@@ -16,15 +16,15 @@ export class LeadService {
     return this.prisma.lead.findMany();
   }
 
-  async findOne(id: number) {
-    return this.prisma.lead.findUnique({ where: { id } });
+  async findOne(lead_id : string) {
+    return this.prisma.lead.findUnique({ where: { lead_id  } });
   }
 
-  async update(id: number, updateLeadDto: UpdateLeadDto) {
-    return this.prisma.lead.update({ where: { id }, data: updateLeadDto });
+  async update(lead_id : string, updateLeadDto: UpdateLeadDto) {
+    return this.prisma.lead.update({ where: { lead_id  }, data: updateLeadDto });
   }
 
-  async remove(id: number) {
-    return this.prisma.lead.delete({ where: { id } });
+  async remove(lead_id: string) {
+    return this.prisma.lead.delete({ where: { lead_id  } });
   }
 }

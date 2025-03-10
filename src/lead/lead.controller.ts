@@ -19,16 +19,16 @@ export class LeadController {
 
   @Get(':id')
   findOne(@Param('id') id: string) {
-    return this.leadService.findOne(+id);
+    return this.leadService.findOne(id); 
   }
 
   @Patch(':id')
   update(@Param('id') id: string, @Body() updateLeadDto: UpdateLeadDto) {
-    return this.leadService.update(+id, updateLeadDto);
+    return this.leadService.update(id, updateLeadDto); 
   }
 
   @Delete(':id')
   remove(@Param('id') id: string) {
-    return this.leadService.remove(+id);
+    return this.leadService.remove(id);
   }
 }
