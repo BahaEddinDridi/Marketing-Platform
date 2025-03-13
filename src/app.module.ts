@@ -4,10 +4,37 @@ import { AppService } from './app.service';
 import { LeadModule } from './lead/lead.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
+import { ConfigModule } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+import { JwtStrategy } from './strategies/jwt.strategy';
+import { RefreshTokenStrategy } from './strategies/refresh-token.strategy';
+import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
-  imports: [LeadModule, AuthModule, UsersModule],
+  imports: [
+    LeadModule,
+    AuthModule,
+    UsersModule,
+    PrismaModule,
+    ThrottlerModule.forRoot({
+      throttlers: [
+        {
+          ttl: 60000,
+          limit: 5,
+        },
+      ],
+    }),
+    ConfigModule.forRoot({ isGlobal: true }),
+    JwtModule.register({}),
+  ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    JwtStrategy,
+    RefreshTokenStrategy,
+  ],
 })
 export class AppModule {}
