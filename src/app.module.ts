@@ -11,6 +11,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { RefreshTokenStrategy } from './strategies/refresh-token.strategy';
 import { PrismaModule } from './prisma/prisma.module';
+import { GoogleStrategy } from './strategies/google.strategy';
 
 @Module({
   imports: [
@@ -35,6 +36,7 @@ import { PrismaModule } from './prisma/prisma.module';
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     JwtStrategy,
     RefreshTokenStrategy,
+    GoogleStrategy
   ],
 })
 export class AppModule {}

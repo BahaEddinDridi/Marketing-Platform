@@ -91,19 +91,35 @@ export class AuthService {
   }
 
   async logout(userId: string) {
-    try {
-      console.log('Logging out user with ID:', userId);  // Log userId to ensure it's passed correctly
-  
+    try {  
       await this.prisma.user.update({
         where: { user_id: userId },
         data: { refreshToken: null },
       });
-  
-      console.log('User logged out successfully');
-    } catch (error) {
-      console.error('Error during logout:', error);  // Log any error that occurs
+      } catch (error) {
       throw new Error('Failed to logout user');
     }
   }
   
+  async validateGoogleUser(googleId: string, email: string, firstname: string) {
+    let user = await this.prisma.user.findUnique({
+      where: { email },
+    });
+
+    if (!user) {
+      user = await this.prisma.user.create({
+        data: {
+          googleId,
+          email,
+          firstname,
+          lastname: '',
+          password: '',
+          role: 'user',
+        },
+      });
+    }
+
+    return this.generateTokens(user.user_id, user.email);
+  }
+
 }
