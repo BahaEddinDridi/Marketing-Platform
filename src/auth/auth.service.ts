@@ -42,7 +42,15 @@ export class AuthService {
     const tokens = await this.generateTokens(user.user_id, user.email);
     await this.saveRefreshToken(user.user_id, tokens.refreshToken);
 
-    return tokens;
+    return {
+      message: 'Login successful',
+      user: {
+        user_id: user.user_id,
+        email: user.email,
+      },
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    };
   }
 
   async generateTokens(userId: string, email: string) {
@@ -91,16 +99,16 @@ export class AuthService {
   }
 
   async logout(userId: string) {
-    try {  
+    try {
       await this.prisma.user.update({
         where: { user_id: userId },
         data: { refreshToken: null },
       });
-      } catch (error) {
+    } catch (error) {
       throw new Error('Failed to logout user');
     }
   }
-  
+
   async validateGoogleUser(googleId: string, email: string, firstname: string) {
     let user = await this.prisma.user.findUnique({
       where: { email },
@@ -121,5 +129,4 @@ export class AuthService {
 
     return this.generateTokens(user.user_id, user.email);
   }
-
 }

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
-import { Strategy } from 'passport-jwt';
+import { Strategy, ExtractJwt } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -11,7 +11,9 @@ export class RefreshTokenStrategy extends PassportStrategy(Strategy, 'refresh') 
     private readonly configService: ConfigService,
   ) {
     super({
-      jwtFromRequest: (req) => req.cookies['refresh_token'],
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        (req) => req?.cookies?.refreshToken, 
+      ]),
       secretOrKey: configService.get<string>('JWT_REFRESH_SECRET'),
     });
   }
