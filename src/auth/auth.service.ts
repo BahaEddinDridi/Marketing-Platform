@@ -15,12 +15,12 @@ export class AuthService {
   ) {}
 
   async register(registerDto: RegisterDto) {
-    const { firstname, lastname, email, password } = registerDto;
+    const { firstName, lastName, email, password } = registerDto;
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await this.prisma.user.create({
       data: {
-        firstname,
-        lastname,
+        firstName,
+        lastName,
         email,
         password: hashedPassword,
         role: 'user',
@@ -109,7 +109,7 @@ export class AuthService {
     }
   }
 
-  async validateGoogleUser(googleId: string, email: string, firstname: string) {
+  async validateGoogleUser(googleId: string, email: string, firstName: string) {
     let user = await this.prisma.user.findUnique({
       where: { email },
     });
@@ -119,8 +119,8 @@ export class AuthService {
         data: {
           googleId,
           email,
-          firstname,
-          lastname: '',
+          firstName,
+          lastName: '',
           password: '',
           role: 'user',
         },
