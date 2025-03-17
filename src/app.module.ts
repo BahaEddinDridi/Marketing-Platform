@@ -12,6 +12,8 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { RefreshTokenStrategy } from './strategies/refresh-token.strategy';
 import { PrismaModule } from './prisma/prisma.module';
 import { GoogleStrategy } from './strategies/google.strategy';
+import { CampaignsModule } from './campaigns/campaigns.module';
+import { AnalyticsModule } from './analytics/analytics.module';
 
 @Module({
   imports: [
@@ -29,6 +31,8 @@ import { GoogleStrategy } from './strategies/google.strategy';
     }),
     ConfigModule.forRoot({ isGlobal: true }),
     JwtModule.register({}),
+    CampaignsModule,
+    AnalyticsModule,
   ],
   controllers: [AppController],
   providers: [

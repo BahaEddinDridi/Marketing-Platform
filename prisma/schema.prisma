@@ -14,36 +14,42 @@ datasource db {
 }
 
 model User {
-  user_id    String   @id @default(uuid())
-  firstName  String?
-  lastName   String?
-  email      String   @unique
-  password  String
-  refreshToken  String?
-  role       String
-  googleId  String? @unique
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
+  user_id      String   @id @default(uuid())
+  firstName    String?
+  lastName     String?
+  email        String   @unique
+  password     String
+  refreshToken String?
+  role         String
+  googleId     String?  @unique
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+}
+
+enum SyncStatus {
+  CONNECTED
+  SYNCING
+  FAILED
 }
 
 model MarketingPlatform {
-  platform_id   String   @id @default(uuid())
-  platform_name String   @unique
+  platform_id    String                @id @default(uuid())
+  platform_name  String                @unique
   last_sync_time DateTime?
-  sync_status   String
-  campaigns     Campaign[]
-  credentials   PlatformCredentials[]
+  sync_status    SyncStatus            @default(CONNECTED)
+  campaigns      Campaign[]
+  credentials    PlatformCredentials[]
 }
 
 model PlatformCredentials {
-  credential_id String   @id @default(uuid())
-  platform     MarketingPlatform @relation(fields: [platform_id], references: [platform_id])
-  platform_id  String
-  access_token String
-  refresh_token String
-  token_expiry DateTime
-  created_at   DateTime @default(now())
-  updated_at   DateTime @updatedAt
+  credential_id String            @id @default(uuid())
+  platform      MarketingPlatform @relation(fields: [platform_id], references: [platform_id])
+  platform_id   String
+  access_token  String
+  refresh_token String?
+  token_expiry  DateTime
+  created_at    DateTime          @default(now())
+  updated_at    DateTime          @updatedAt
 }
 
 enum LeadStatus {
@@ -55,40 +61,47 @@ enum LeadStatus {
 }
 
 model Lead {
-  lead_id        String   @id @default(uuid())
+  lead_id         String     @id @default(uuid())
   source_platform String
-  name          String
-  email         String   @unique
-  phone         String?
-  company       String?
-  job_title     String?
-  status        LeadStatus
-  created_at    DateTime @default(now())
-  updated_at    DateTime @updatedAt
+  name            String
+  email           String     @unique
+  phone           String?
+  company         String?
+  job_title       String?
+  status          LeadStatus
+  created_at      DateTime   @default(now())
+  updated_at      DateTime   @updatedAt
+}
+
+enum CampaignStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
 }
 
 model Campaign {
-  campaign_id   String   @id @default(uuid())
+  campaign_id   String                @id @default(uuid())
   campaign_name String
-  platform      MarketingPlatform @relation(fields: [platform_id], references: [platform_id])
-  platform_id   String
+  platform      MarketingPlatform?     @relation(fields: [platform_id], references: [platform_id])
+  platform_id   String?                
   budget        Float
   start_date    DateTime
-  end_date      DateTime
-  status        String
+  end_date      DateTime?
+  status        CampaignStatus        @default(ACTIVE)
   performances  CampaignPerformance[]
-  created_at    DateTime @default(now())
-  updated_at    DateTime @updatedAt
+  created_at    DateTime              @default(now())
+  updated_at    DateTime              @updatedAt
 }
 
 model CampaignPerformance {
   performance_id String   @id @default(uuid())
-  campaign      Campaign @relation(fields: [campaign_id], references: [campaign_id])
-  campaign_id   String
-  clicks        Int
-  impressions   Int
-  conversions   Int
-  cost          Float
-  roi           Float
-  date          DateTime
+  campaign       Campaign @relation(fields: [campaign_id], references: [campaign_id])
+  campaign_id    String   
+  clicks         Int      @default(0)
+  impressions    Int      @default(0)
+  conversions    Int      @default(0)
+  cost           Float
+  roi            Float
+  date           DateTime
+  created_at     DateTime @default(now())
 }
