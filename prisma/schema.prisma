@@ -22,8 +22,18 @@ model User {
   refreshToken String?
   role         String
   googleId     String?  @unique
+  password_tokens PasswordResetToken[]
   created_at   DateTime @default(now())
   updated_at   DateTime @updatedAt
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  user      User     @relation(fields: [user_id], references: [user_id])
+  user_id    String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
 }
 
 enum SyncStatus {

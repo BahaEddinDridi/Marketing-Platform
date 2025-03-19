@@ -14,6 +14,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { CampaignsModule } from './campaigns/campaigns.module';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { PasswordResetModule } from './password-reset/password-reset.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
     JwtModule.register({}),
     CampaignsModule,
     AnalyticsModule,
+    PasswordResetModule,
   ],
   controllers: [AppController],
   providers: [

@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
-import { AuthController } from './auth.controller';
-import { AuthService } from './auth.service';
+import { PasswordResetService } from './password-reset.service';
+import { PasswordResetController } from './password-reset.controller';
 import { PrismaModule } from 'src/prisma/prisma.module';
 import { JwtModule } from '@nestjs/jwt';
 
@@ -12,8 +12,7 @@ import { JwtModule } from '@nestjs/jwt';
       signOptions: { expiresIn: '1h' },
     }),
   ],
-  controllers: [AuthController],
-  providers: [AuthService],
-  exports: [AuthService],
+  providers: [PasswordResetService],
+  controllers: [PasswordResetController],
 })
-export class AuthModule {}
+export class PasswordResetModule {}
