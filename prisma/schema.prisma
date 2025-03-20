@@ -13,25 +13,47 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Status {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
 model User {
-  user_id      String   @id @default(uuid())
-  firstName    String?
-  lastName     String?
-  email        String   @unique
-  password     String
-  refreshToken String?
-  role         String
-  googleId     String?  @unique
+  user_id         String               @id @default(uuid())
+  firstName       String?
+  lastName        String?
+  email           String               @unique
+  password        String
+  phoneNumber     String?
+  street          String?
+  city            String?
+  state           String?
+  zipCode         String?
+  country         String?
+  birthdate       DateTime?
+  occupation      String?
+  lastLogin       DateTime?
+  profilePicture  String?
+  role            Role                 @default(USER)
+  status          Status               @default(ACTIVE)
+  refreshToken    String?
+  googleId        String?              @unique
   password_tokens PasswordResetToken[]
-  created_at   DateTime @default(now())
-  updated_at   DateTime @updatedAt
+  created_at      DateTime             @default(now())
+  updated_at      DateTime             @updatedAt
 }
 
 model PasswordResetToken {
   id        String   @id @default(uuid())
   token     String   @unique
   user      User     @relation(fields: [user_id], references: [user_id])
-  user_id    String
+  user_id   String
   createdAt DateTime @default(now())
   expiresAt DateTime
 }
@@ -92,8 +114,8 @@ enum CampaignStatus {
 model Campaign {
   campaign_id   String                @id @default(uuid())
   campaign_name String
-  platform      MarketingPlatform?     @relation(fields: [platform_id], references: [platform_id])
-  platform_id   String?                
+  platform      MarketingPlatform?    @relation(fields: [platform_id], references: [platform_id])
+  platform_id   String?
   budget        Float
   start_date    DateTime
   end_date      DateTime?
@@ -106,7 +128,7 @@ model Campaign {
 model CampaignPerformance {
   performance_id String   @id @default(uuid())
   campaign       Campaign @relation(fields: [campaign_id], references: [campaign_id])
-  campaign_id    String   
+  campaign_id    String
   clicks         Int      @default(0)
   impressions    Int      @default(0)
   conversions    Int      @default(0)

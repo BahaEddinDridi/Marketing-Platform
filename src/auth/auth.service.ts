@@ -23,7 +23,7 @@ export class AuthService {
         lastName,
         email,
         password: hashedPassword,
-        role: 'user',
+        role: 'USER',
       },
     });
     return { message: 'User registered successfully', user };
@@ -122,7 +122,7 @@ export class AuthService {
           firstName,
           lastName: '',
           password: '',
-          role: 'user',
+          role: 'USER',
         },
       });
     }
