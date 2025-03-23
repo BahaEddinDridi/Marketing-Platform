@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { UpdateUserDto } from './dto/update-user.dto';
+import * as bcrypt from 'bcryptjs';
+import { v2 as cloudinary } from 'cloudinary';
 
 @Injectable()
 export class UsersService {
@@ -27,6 +29,7 @@ export class UsersService {
         state: true,
         zipCode: true,
         country: true,
+        profileImage: true,
       },
     });
     if (!user) throw new NotFoundException('User not found');
@@ -37,6 +40,7 @@ export class UsersService {
     userId: string,
     requesterId: string,
     updateData: UpdateUserDto,
+    file?: Express.Multer.File,
   ) {
      if (userId !== requesterId) {
        throw new UnauthorizedException('You can only update your own profile');
@@ -47,6 +51,24 @@ export class UsersService {
     });
     if (!user) {
       throw new NotFoundException('User not found');
+    }
+    let imageUrl: string | undefined;
+    if (file) {
+      const uploadResult = await new Promise<any>((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'user_profiles',
+            public_id: `${userId}_${Date.now()}`,
+            resource_type: 'image',
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          },
+        );
+        stream.end(file.buffer);
+      });
+      imageUrl = uploadResult.secure_url;
     }
 
     const updatedUser = await this.prisma.user.update({
@@ -64,6 +86,7 @@ export class UsersService {
           ? new Date(updateData.birthdate)
           : undefined,
         occupation: updateData.occupation,
+        profileImage: imageUrl || user.profileImage,
         updated_at: new Date(),
       },
     });
@@ -81,25 +104,80 @@ export class UsersService {
       country: updatedUser.country,
       birthdate: updatedUser.birthdate,
       occupation: updatedUser.occupation,
+      profileImage: updatedUser.profileImage,
     };
   }
 
-  async deleteUser(userId: string, requesterId: string) {
+  async deleteUser(userId: string, requesterId: string, password: string) {
     if (userId !== requesterId) {
       throw new UnauthorizedException('You can only delete your own account');
     }
 
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
+      select: { 
+        user_id: true,
+        password: true 
+      }
     });
+  
     if (!user) {
       throw new NotFoundException('User not found');
     }
 
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Incorrect password');
+    }
+    
     await this.prisma.user.delete({
       where: { user_id: userId },
     });
 
     return { message: 'Account deleted successfully' };
+  }
+
+
+  async getProfileCompletionPercentage(userId: string): Promise<number> {
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+      select: {
+        firstName: true,
+        lastName: true,
+        phoneNumber: true,
+        street: true,
+        city: true,
+        state: true,
+        zipCode: true,
+        country: true,
+        birthdate: true,
+        occupation: true,
+        profileImage: true,
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const fields = [
+      user.firstName,
+      user.lastName,
+      user.phoneNumber,
+      user.street,
+      user.city,
+      user.state,
+      user.country,
+      user.birthdate,
+      user.occupation,
+    ];
+
+    const totalFields = fields.length;
+    const filledFields = fields.filter((field) => {
+      return field !== null && field !== undefined && field !== '';
+    }).length;
+
+    const completionPercentage = (filledFields / totalFields) * 100;
+    return Math.round(completionPercentage);
   }
 }

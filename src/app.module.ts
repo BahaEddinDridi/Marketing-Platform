@@ -26,7 +26,7 @@ import { PasswordResetModule } from './password-reset/password-reset.module';
       throttlers: [
         {
           ttl: 60000,
-          limit: 5,
+          limit: 30,
         },
       ],
     }),

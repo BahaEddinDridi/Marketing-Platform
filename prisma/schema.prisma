@@ -38,6 +38,7 @@ model User {
   country         String?
   birthdate       DateTime?
   occupation      String?
+  profileImage    String?
   lastLogin       DateTime?
   profilePicture  String?
   role            Role                 @default(USER)
