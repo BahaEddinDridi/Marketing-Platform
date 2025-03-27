@@ -109,6 +109,8 @@ export class AuthService {
     }
   }
 
+  /////////////////////////// GOOGLE ///////////////////////////////////
+
   async validateGoogleUser(googleId: string, email: string, firstName: string) {
     let user = await this.prisma.user.findUnique({
       where: { email },
@@ -129,4 +131,14 @@ export class AuthService {
 
     return this.generateTokens(user.user_id, user.email);
   }
+
+
+
+
+    /////////////////////////// MICROSOFT ///////////////////////////////////
+
+
 }
+
+
+
