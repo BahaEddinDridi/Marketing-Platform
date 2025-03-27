@@ -132,13 +132,48 @@ export class AuthService {
     return this.generateTokens(user.user_id, user.email);
   }
 
+  /////////////////////////// MICROSOFT ///////////////////////////////////
 
+  async validateMicrosoftUser(
+    microsoftId: string,
+    email: string,
+    firstName: string,
+    refreshToken: string,
+    accessToken: string,
+    expiresIn: number,
+  ) {
+    let user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      user = await this.prisma.user.create({
+        data: {
+          microsoftId,
+          email,
+          firstName,
+          lastName: '',
+          password: '',
+          role: 'USER',
+        },
+      });
+    }
 
+    let platform = await this.prisma.marketingPlatform.findFirst({
+      where: { user_id: user.user_id, platform_name: 'Microsoft' },
+    });
+    if (!platform) {
+      platform = await this.prisma.marketingPlatform.create({
+        data: { platform_name: 'Microsoft', user_id: user.user_id },
+      });
+    }
 
-    /////////////////////////// MICROSOFT ///////////////////////////////////
+    await this.prisma.platformCredentials.create({
+      data: {
+        platform_id: platform.platform_id,
+        refresh_token: refreshToken,
+      },
+    });
 
+    const tokens = await this.generateTokens(user.user_id, user.email);
+    return { user, tokens };
+  }
 
 }
-
-
-

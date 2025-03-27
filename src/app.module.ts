@@ -15,6 +15,7 @@ import { GoogleStrategy } from './strategies/google.strategy';
 import { CampaignsModule } from './campaigns/campaigns.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { PasswordResetModule } from './password-reset/password-reset.module';
+import { MicrosoftStrategy } from './strategies/microsoft.strategy';
 
 @Module({
   imports: [
@@ -42,7 +43,8 @@ import { PasswordResetModule } from './password-reset/password-reset.module';
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     JwtStrategy,
     RefreshTokenStrategy,
-    GoogleStrategy
+    GoogleStrategy,
+    MicrosoftStrategy
   ],
 })
 export class AppModule {}

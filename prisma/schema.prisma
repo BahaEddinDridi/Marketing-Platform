@@ -25,29 +25,31 @@ enum Status {
 }
 
 model User {
-  user_id         String               @id @default(uuid())
-  firstName       String?
-  lastName        String?
-  email           String               @unique
-  password        String
-  phoneNumber     String?
-  street          String?
-  city            String?
-  state           String?
-  zipCode         String?
-  country         String?
-  birthdate       DateTime?
-  occupation      String?
-  profileImage    String?
-  lastLogin       DateTime?
-  profilePicture  String?
-  role            Role                 @default(USER)
-  status          Status               @default(ACTIVE)
-  refreshToken    String?
-  googleId        String?              @unique
-  password_tokens PasswordResetToken[]
-  created_at      DateTime             @default(now())
-  updated_at      DateTime             @updatedAt
+  user_id            String               @id @default(uuid())
+  firstName          String?
+  lastName           String?
+  email              String               @unique
+  password           String
+  phoneNumber        String?
+  street             String?
+  city               String?
+  state              String?
+  zipCode            String?
+  country            String?
+  birthdate          DateTime?
+  occupation         String?
+  profileImage       String?
+  lastLogin          DateTime?
+  profilePicture     String?
+  role               Role                 @default(USER)
+  status             Status               @default(ACTIVE)
+  refreshToken       String?
+  googleId           String?              @unique
+  microsoftId        String?              @unique
+  marketingPlatforms MarketingPlatform[]
+  password_tokens    PasswordResetToken[]
+  created_at         DateTime             @default(now())
+  updated_at         DateTime             @updatedAt
 }
 
 model PasswordResetToken {
@@ -68,6 +70,8 @@ enum SyncStatus {
 model MarketingPlatform {
   platform_id    String                @id @default(uuid())
   platform_name  String                @unique
+  user_id        String
+  user           User                  @relation(fields: [user_id], references: [user_id])
   last_sync_time DateTime?
   sync_status    SyncStatus            @default(CONNECTED)
   campaigns      Campaign[]
@@ -78,9 +82,7 @@ model PlatformCredentials {
   credential_id String            @id @default(uuid())
   platform      MarketingPlatform @relation(fields: [platform_id], references: [platform_id])
   platform_id   String
-  access_token  String
   refresh_token String?
-  token_expiry  DateTime
   created_at    DateTime          @default(now())
   updated_at    DateTime          @updatedAt
 }

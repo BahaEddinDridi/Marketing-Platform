@@ -111,10 +111,53 @@ export class AuthController {
     return { message: 'Redirecting to Google...' };
   }
 
-  // Handle Google OAuth callback
   @Get('google/redirect')
   @UseGuards(AuthGuard('google'))
   async googleAuthRedirect(@Req() req) {
     return this.authService.generateTokens(req.user.user_id, req.user.email);
+  }
+
+  ///////////////////////// MICROSOFT ////////////////////////
+
+  @Get('microsoft')
+  @UseGuards(AuthGuard('microsoft'))
+  async microsoftLogin() {}
+
+  @Get('microsoft/callback')
+  @UseGuards(AuthGuard('microsoft'))
+  async microsoftLoginCallback(@Req() req, @Res() res: Response) {
+    const {
+      user,
+      tokens,
+      microsoftAccessToken,
+      microsoftRefreshToken,
+      expiresIn,
+    } = req.user;
+    res.cookie('accessToken', tokens.accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000,
+    });
+
+    res.cookie('refreshToken', tokens.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.cookie('ms_access_token', microsoftAccessToken, {
+      httpOnly: true,
+      secure: false,
+      maxAge: expiresIn * 1000,
+    });
+    res.cookie('ms_refresh_token', microsoftRefreshToken, {
+      httpOnly: true,
+      secure: false,
+      maxAge: 90 * 24 * 3600 * 1000,
+    });
+
+    res.redirect('http://localhost:3000/signin?callback=microsoft');
   }
 }
