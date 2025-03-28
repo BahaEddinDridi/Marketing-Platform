@@ -129,9 +129,6 @@ export class AuthController {
     const {
       user,
       tokens,
-      microsoftAccessToken,
-      microsoftRefreshToken,
-      expiresIn,
     } = req.user;
     res.cookie('accessToken', tokens.accessToken, {
       httpOnly: true,
@@ -146,18 +143,6 @@ export class AuthController {
       sameSite: 'strict',
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
-
-    res.cookie('ms_access_token', microsoftAccessToken, {
-      httpOnly: true,
-      secure: false,
-      maxAge: expiresIn * 1000,
-    });
-    res.cookie('ms_refresh_token', microsoftRefreshToken, {
-      httpOnly: true,
-      secure: false,
-      maxAge: 90 * 24 * 3600 * 1000,
-    });
-
     res.redirect('http://localhost:3000/signin?callback=microsoft');
   }
 }

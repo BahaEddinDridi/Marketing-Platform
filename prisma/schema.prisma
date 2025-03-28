@@ -69,22 +69,29 @@ enum SyncStatus {
 
 model MarketingPlatform {
   platform_id    String                @id @default(uuid())
-  platform_name  String                @unique
+  platform_name  String                
   user_id        String
   user           User                  @relation(fields: [user_id], references: [user_id])
   last_sync_time DateTime?
   sync_status    SyncStatus            @default(CONNECTED)
   campaigns      Campaign[]
   credentials    PlatformCredentials[]
+  created_at     DateTime              @default(now())
+  updated_at     DateTime              @updatedAt
+
+  @@unique([user_id, platform_name])
 }
 
 model PlatformCredentials {
-  credential_id String            @id @default(uuid())
-  platform      MarketingPlatform @relation(fields: [platform_id], references: [platform_id])
-  platform_id   String
-  refresh_token String?
-  created_at    DateTime          @default(now())
-  updated_at    DateTime          @updatedAt
+  credential_id  String            @id @default(uuid())
+  platform       MarketingPlatform @relation(fields: [platform_id], references: [platform_id])
+  platform_id    String
+  access_token   String?           
+  refresh_token  String?           
+  scopes         String[]          
+  expires_at     DateTime?         
+  created_at     DateTime          @default(now())
+  updated_at     DateTime          @updatedAt
 }
 
 enum LeadStatus {
