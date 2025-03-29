@@ -281,23 +281,20 @@ export class AuthService {
   }
 
   async getMicrosoftToken(userId: string, scopes: string[]): Promise<string> {
-    console.log('AuthService: getMicrosoftToken:', { userId, scopes });
     const creds = await this.prisma.platformCredentials.findFirst({
       where: {
         platform: { user_id: userId, platform_name: 'Microsoft' },
         scopes: { hasEvery: scopes },
       },
     });
-    console.log('AuthService: Creds:', creds);
 
     if (!creds || !creds.refresh_token) {
-      console.log('AuthService: Missing creds or refresh token');
       throw new Error('No valid credentials');
     }
 
-    const isExpired = creds.expires_at && new Date(creds.expires_at) < new Date();
+    const isExpired =
+      creds.expires_at && new Date(creds.expires_at) < new Date();
     if (isExpired) {
-      console.log('AuthService: Token expired—refreshing');
       try {
         const refreshResponse = await axios.post<MicrosoftTokenResponse>(
           'https://login.microsoftonline.com/common/oauth2/v2.0/token',
@@ -308,7 +305,7 @@ export class AuthService {
             refresh_token: creds.refresh_token,
             scope: scopes.join(' '),
           }).toString(),
-          { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+          { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
         );
 
         const newToken = refreshResponse.data.access_token;
@@ -316,23 +313,22 @@ export class AuthService {
           where: { credential_id: creds.credential_id },
           data: {
             access_token: newToken,
-            refresh_token: refreshResponse.data.refresh_token || creds.refresh_token,
-            expires_at: new Date(Date.now() + refreshResponse.data.expires_in * 1000),
+            refresh_token:
+              refreshResponse.data.refresh_token || creds.refresh_token,
+            expires_at: new Date(
+              Date.now() + refreshResponse.data.expires_in * 1000,
+            ),
           },
         });
-        console.log('AuthService: Token refreshed');
         return newToken;
       } catch (error) {
-        console.error('AuthService: Refresh failed:', error.response?.data || error.message);
         throw new Error('Token refresh failed');
       }
     }
 
     if (!creds.access_token) {
-      console.log('AuthService: No access token');
       throw new Error('Access token missing');
     }
-    console.log('AuthService: Returning token');
     return creds.access_token;
   }
   async updateMicrosoftCredentials(
@@ -347,21 +343,21 @@ export class AuthService {
     if (!user) {
       throw new Error('User not found for Microsoft ID');
     }
-  
+
     let platform = await this.prisma.marketingPlatform.findFirst({
       where: { user_id: user.user_id, platform_name: 'Microsoft' },
     });
-  
+
     if (!platform) {
       platform = await this.prisma.marketingPlatform.create({
         data: { platform_name: 'Microsoft', user_id: user.user_id },
       });
     }
-  
+
     let creds = await this.prisma.platformCredentials.findFirst({
       where: { platform_id: platform.platform_id, scopes: { equals: scopes } },
     });
-  
+
     if (!creds) {
       creds = await this.prisma.platformCredentials.create({
         data: {
@@ -382,7 +378,7 @@ export class AuthService {
         },
       });
     }
-  
+
     return creds;
   }
 }

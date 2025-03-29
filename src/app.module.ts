@@ -47,7 +47,6 @@ import { MicrosoftTestStrategy } from './strategies/microsoft-test.strategy';
     RefreshTokenStrategy,
     GoogleStrategy,
     MicrosoftStrategy,
-    MicrosoftLeadsStrategy,
     MicrosoftTestStrategy
   ],
 })

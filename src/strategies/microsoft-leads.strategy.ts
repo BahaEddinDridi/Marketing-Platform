@@ -32,11 +32,15 @@ export class MicrosoftLeadsStrategy extends PassportStrategy(Strategy, 'microsof
     const expiresIn = req.authInfo?.expires_in || 3600;
     const scopes = ['mail.read', 'offline_access'];
     const userId = req.user?.user_id || id;
-    console.log("userId", userId)
-    // Update PlatformCredentials only—no app auth
-    await this.authService.updateMicrosoftCredentials(id, email, refreshToken, accessToken, expiresIn, scopes);
+    await this.authService.updateMicrosoftCredentials(
+      id,
+      email,
+      refreshToken,
+      accessToken,
+      expiresIn,
+      scopes,
+    );
 
-    // Return user from existing session (JWT), not new tokens
     const user = req.user || { microsoftId: id, email };
     return done(null, user);
   }

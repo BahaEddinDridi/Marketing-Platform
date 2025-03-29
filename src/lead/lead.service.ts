@@ -1,8 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { UpdateLeadDto } from './dto/update-lead.dto';
 import { AuthService } from 'src/auth/auth.service';
+import axios from 'axios';
 
 interface GraphEmailResponse {
   value: {
@@ -11,12 +12,19 @@ interface GraphEmailResponse {
     subject: string;
     bodyPreview: string;
     receivedDateTime: string;
-    inReplyTo?: string;
+    isRead: boolean;
+    ccRecipients: { emailAddress: { address: string; name: string } }[];
+    bccRecipients: { emailAddress: { address: string; name: string } }[];
+    hasAttachments: boolean;
+    inReplyTo?: string; 
   }[];
 }
 
+
 @Injectable()
 export class LeadService {
+  private readonly logger = new Logger(LeadService.name);
+
   constructor(
     private prisma: PrismaService,
     private readonly authService: AuthService,
@@ -43,57 +51,57 @@ export class LeadService {
   }
 
   async fetchEmails(userId: string) {
-    console.log('Test');
-    console.log('LeadService: Starting for userId:', userId);
     const scopes = ['mail.read', 'offline_access'];
 
     const platform = await this.prisma.marketingPlatform.findFirst({
       where: { user_id: userId, platform_name: 'Microsoft' },
       include: { credentials: true },
     });
-    console.log('LeadService: Platform:', platform);
-
     if (!platform) {
-      console.log('LeadService: No platform');
       return { needsAuth: true, authUrl: '/auth/microsoft/leads' };
     }
 
     const creds = platform.credentials.find((cred) =>
       scopes.every((scope) => cred.scopes.includes(scope)),
     );
-    console.log('LeadService: Credentials:', creds);
-
     if (!creds) {
-      console.log('LeadService: No creds');
       return { needsAuth: true, authUrl: '/auth/microsoft/leads' };
     }
-
     try {
       const token = await this.authService.getMicrosoftToken(userId, scopes);
-      console.log('LeadService: Token:', token);
 
       const response = await axios.get<GraphEmailResponse>(
-        'https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages',
+        'https://graph.microsoft.com/v1.0/me/messages',
         {
           headers: { Authorization: `Bearer ${token}` },
           params: {
             $top: 50,
-            $select: 'from,subject,bodyPreview,receivedDateTime,inReplyTo',
+            $select: 'subject,from,receivedDateTime,bodyPreview,isRead,ccRecipients,bccRecipients,hasAttachments',
           },
         },
       );
-      console.log('LeadService: Graph response:', response.data);
-      const result = { needsAuth: false, emails: [] };
-      console.log('LeadService: Returning:', result);
-      return result;
+      const emails = response.data.value;
+      return {
+        needsAuth: false,
+        emails: emails.map((email) => ({
+          subject: email.subject,
+          from: email.from.emailAddress.name, 
+          fromEmail: email.from.emailAddress.address, 
+          receivedAt: email.receivedDateTime,
+          preview: email.bodyPreview,
+          isRead: email.isRead, 
+          ccRecipients: email.ccRecipients, 
+          bccRecipients: email.bccRecipients, 
+          hasAttachments: email.hasAttachments, 
+        })),
+      };
     } catch (error) {
-      console.error(
-        'LeadService: Error:',
+      this.logger.error(
+        'Error fetching emails:',
         error.message,
-        error.response?.status,
         error.response?.data,
       );
-      throw error;
+      return { needsAuth: true, authUrl: '/auth/microsoft/leads' };
     }
   }
 }
