@@ -145,4 +145,37 @@ export class AuthController {
     });
     res.redirect('http://localhost:3000/signin?callback=microsoft');
   }
+
+  @Get('microsoft/leads')
+  @UseGuards(AuthGuard('microsoft-leads'))
+  async microsoftLeadsLogin() {
+  }
+
+  @Get('microsoft/leads/callback')
+  @UseGuards(AuthGuard('microsoft-leads'))
+  async microsoftLeadsCallback(@Req() req, @Res() res: Response) {
+    res.redirect('http://localhost:3000/leads'); 
+  }
+
+  @Get('microsoft/test')
+  @UseGuards(JwtAuthGuard)
+@UseGuards(AuthGuard('microsoft-test'))
+async microsoftTestLogin() {
+  console.log('AuthController: Initiating Microsoft test auth');
+}
+
+@Get('microsoft/test/callback')
+@UseGuards(AuthGuard('microsoft-test'))
+async microsoftTestCallback(@Req() req, @Res() res: Response) {
+  console.log('AuthController: Microsoft test callback', { user: req.user });
+  if (req.user.error) {
+    console.error('AuthController: Error from strategy:', req.user.error);
+    res.redirect('http://localhost:3000/leads?error=' + encodeURIComponent(req.user.error));
+    return;
+  }
+  const userInfo = req.user.userInfo;
+  console.log('AuthController: Redirecting to /leads with user info');
+  res.redirect(`http://localhost:3000/leads?userInfo=${encodeURIComponent(JSON.stringify(userInfo))}`);
+}
+
 }

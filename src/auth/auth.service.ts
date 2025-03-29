@@ -6,6 +6,7 @@ import { RegisterDto } from './dto/register.dto';
 import { ConfigService } from '@nestjs/config';
 import { LoginDto } from './dto/login.dto';
 import axios from 'axios';
+import { ClientSecretCredential } from '@azure/identity';
 
 interface MicrosoftTokenResponse {
   access_token: string;
@@ -15,6 +16,8 @@ interface MicrosoftTokenResponse {
 
 @Injectable()
 export class AuthService {
+  private readonly credential: ClientSecretCredential;
+
   constructor(
     private prisma: PrismaService,
     private jwtService: JwtService,
@@ -278,23 +281,108 @@ export class AuthService {
   }
 
   async getMicrosoftToken(userId: string, scopes: string[]): Promise<string> {
-    const platform = await this.prisma.marketingPlatform.findFirst({
-      where: { user_id: userId, platform_name: 'Microsoft' },
-      include: { credentials: true },
+    console.log('AuthService: getMicrosoftToken:', { userId, scopes });
+    const creds = await this.prisma.platformCredentials.findFirst({
+      where: {
+        platform: { user_id: userId, platform_name: 'Microsoft' },
+        scopes: { hasEvery: scopes },
+      },
     });
+    console.log('AuthService: Creds:', creds);
 
+    if (!creds || !creds.refresh_token) {
+      console.log('AuthService: Missing creds or refresh token');
+      throw new Error('No valid credentials');
+    }
+
+    const isExpired = creds.expires_at && new Date(creds.expires_at) < new Date();
+    if (isExpired) {
+      console.log('AuthService: Token expired—refreshing');
+      try {
+        const refreshResponse = await axios.post<MicrosoftTokenResponse>(
+          'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+          new URLSearchParams({
+            client_id: process.env.MICROSOFT_CLIENT_ID || '',
+            client_secret: process.env.MICROSOFT_CLIENT_SECRET || '',
+            grant_type: 'refresh_token',
+            refresh_token: creds.refresh_token,
+            scope: scopes.join(' '),
+          }).toString(),
+          { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
+
+        const newToken = refreshResponse.data.access_token;
+        await this.prisma.platformCredentials.update({
+          where: { credential_id: creds.credential_id },
+          data: {
+            access_token: newToken,
+            refresh_token: refreshResponse.data.refresh_token || creds.refresh_token,
+            expires_at: new Date(Date.now() + refreshResponse.data.expires_in * 1000),
+          },
+        });
+        console.log('AuthService: Token refreshed');
+        return newToken;
+      } catch (error) {
+        console.error('AuthService: Refresh failed:', error.response?.data || error.message);
+        throw new Error('Token refresh failed');
+      }
+    }
+
+    if (!creds.access_token) {
+      console.log('AuthService: No access token');
+      throw new Error('Access token missing');
+    }
+    console.log('AuthService: Returning token');
+    return creds.access_token;
+  }
+  async updateMicrosoftCredentials(
+    microsoftId: string,
+    email: string,
+    refreshToken: string,
+    accessToken: string,
+    expiresIn: number,
+    scopes: string[],
+  ) {
+    const user = await this.prisma.user.findUnique({ where: { microsoftId } });
+    if (!user) {
+      throw new Error('User not found for Microsoft ID');
+    }
+  
+    let platform = await this.prisma.marketingPlatform.findFirst({
+      where: { user_id: user.user_id, platform_name: 'Microsoft' },
+    });
+  
     if (!platform) {
-      throw new Error('Microsoft platform not found for user');
+      platform = await this.prisma.marketingPlatform.create({
+        data: { platform_name: 'Microsoft', user_id: user.user_id },
+      });
     }
-
-    const creds = platform.credentials.find((cred) =>
-      scopes.every((scope) => cred.scopes.includes(scope)),
-    );
-
+  
+    let creds = await this.prisma.platformCredentials.findFirst({
+      where: { platform_id: platform.platform_id, scopes: { equals: scopes } },
+    });
+  
     if (!creds) {
-      throw new Error('No credentials found for the specified scopes');
+      creds = await this.prisma.platformCredentials.create({
+        data: {
+          platform_id: platform.platform_id,
+          access_token: accessToken,
+          refresh_token: refreshToken || null,
+          scopes,
+          expires_at: new Date(Date.now() + expiresIn * 1000),
+        },
+      });
+    } else {
+      creds = await this.prisma.platformCredentials.update({
+        where: { credential_id: creds.credential_id },
+        data: {
+          access_token: accessToken,
+          refresh_token: refreshToken || null,
+          expires_at: new Date(Date.now() + expiresIn * 1000),
+        },
+      });
     }
-
-    return this.refreshMicrosoftToken(userId, scopes);
+  
+    return creds;
   }
 }

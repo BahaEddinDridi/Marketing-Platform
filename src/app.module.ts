@@ -16,6 +16,8 @@ import { CampaignsModule } from './campaigns/campaigns.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { PasswordResetModule } from './password-reset/password-reset.module';
 import { MicrosoftStrategy } from './strategies/microsoft.strategy';
+import { MicrosoftLeadsStrategy } from './strategies/microsoft-leads.strategy';
+import { MicrosoftTestStrategy } from './strategies/microsoft-test.strategy';
 
 @Module({
   imports: [
@@ -27,7 +29,7 @@ import { MicrosoftStrategy } from './strategies/microsoft.strategy';
       throttlers: [
         {
           ttl: 60000,
-          limit: 30,
+          limit: 100,
         },
       ],
     }),
@@ -44,7 +46,9 @@ import { MicrosoftStrategy } from './strategies/microsoft.strategy';
     JwtStrategy,
     RefreshTokenStrategy,
     GoogleStrategy,
-    MicrosoftStrategy
+    MicrosoftStrategy,
+    MicrosoftLeadsStrategy,
+    MicrosoftTestStrategy
   ],
 })
 export class AppModule {}
