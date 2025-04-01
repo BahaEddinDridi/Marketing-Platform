@@ -47,6 +47,7 @@ model User {
   googleId           String?              @unique
   microsoftId        String?              @unique
   marketingPlatforms MarketingPlatform[]
+  leads              Lead[]
   password_tokens    PasswordResetToken[]
   created_at         DateTime             @default(now())
   updated_at         DateTime             @updatedAt
@@ -69,7 +70,7 @@ enum SyncStatus {
 
 model MarketingPlatform {
   platform_id    String                @id @default(uuid())
-  platform_name  String                
+  platform_name  String
   user_id        String
   user           User                  @relation(fields: [user_id], references: [user_id])
   last_sync_time DateTime?
@@ -83,15 +84,15 @@ model MarketingPlatform {
 }
 
 model PlatformCredentials {
-  credential_id  String            @id @default(uuid())
-  platform       MarketingPlatform @relation(fields: [platform_id], references: [platform_id])
-  platform_id    String
-  access_token   String?           
-  refresh_token  String?           
-  scopes         String[]          
-  expires_at     DateTime?         
-  created_at     DateTime          @default(now())
-  updated_at     DateTime          @updatedAt
+  credential_id String            @id @default(uuid())
+  platform      MarketingPlatform @relation(fields: [platform_id], references: [platform_id])
+  platform_id   String
+  access_token  String?
+  refresh_token String?
+  scopes        String[]
+  expires_at    DateTime?
+  created_at    DateTime          @default(now())
+  updated_at    DateTime          @updatedAt
 }
 
 enum LeadStatus {
@@ -104,15 +105,34 @@ enum LeadStatus {
 
 model Lead {
   lead_id         String     @id @default(uuid())
+  user_id         String
   source_platform String
   name            String
-  email           String     @unique
+  email           String
   phone           String?
   company         String?
   job_title       String?
   status          LeadStatus
   created_at      DateTime   @default(now())
   updated_at      DateTime   @updatedAt
+
+  user User @relation(fields: [user_id], references: [user_id])
+
+  @@unique([user_id, email, source_platform], name: "user_id_email_source_platform_unique")
+  @@index([user_id])
+  @@index([source_platform])
+}
+
+model SyncState {
+  id           String   @id @default(uuid())
+  user_id      String
+  platform     String
+  folderId     String
+  deltaLink    String
+  lastSyncedAt DateTime @default(now()) @updatedAt
+
+  @@unique([user_id, folderId], name: "user_id_folderId_unique")
+  @@index([user_id])
 }
 
 enum CampaignStatus {

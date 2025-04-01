@@ -26,11 +26,7 @@ export class LeadController {
   constructor(private readonly leadService: LeadService) {
   }
 
-  @Post()
-  @UseGuards(JwtAuthGuard)
-  create(@Body() createLeadDto: CreateLeadDto) {
-    return this.leadService.create(createLeadDto);
-  }
+
 
   @Get()
   findAll() {
@@ -43,7 +39,7 @@ export class LeadController {
     const user = req.user as { user_id: string; email: string };
     const user_id = user.user_id;
     try {
-      const result = await this.leadService.fetchEmails(user_id);
+      const result = await this.leadService.fetchAndStoreLeads(user_id);
       return result || { error: 'No data returned from service' };
     } catch (error) {
       console.error('LeadController: Error:', error.message);
@@ -51,17 +47,29 @@ export class LeadController {
     }
   }
 
+  @Get('getByUserId')
+  @UseGuards(JwtAuthGuard)
+  async getByUserId(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string };
+    const user_id = user.user_id;
+    return this.leadService.fetchLeadsByUserId(user_id);
+  }
+
+  @Post('update-status')
+  @UseGuards(JwtAuthGuard)
+  async updateLeadStatus(@Req() req, @Body() body: { leadId: string; status: string }) {
+    const { leadId, status } = body;
+    return this.leadService.updateLeadStatus(leadId, status);
+  }
+
+  
   @Get(':id')
   @UseGuards(JwtAuthGuard)
   findOne(@Param('id') id: string) {
     return this.leadService.findOne(id);
   }
 
-  @Patch(':id')
-  @UseGuards(JwtAuthGuard)
-  update(@Param('id') id: string, @Body() updateLeadDto: UpdateLeadDto) {
-    return this.leadService.update(id, updateLeadDto);
-  }
+
 
   @Delete(':id')
   @UseGuards(JwtAuthGuard)
@@ -69,16 +77,4 @@ export class LeadController {
     return this.leadService.remove(id);
   }
 
-  @Get('test-fetch')
-  @UseGuards(JwtAuthGuard)
-  async initiateTestFetch(@Req() req) {
-    console.log('LeadController: Initiating test fetch', { user: req.user });
-    if (!req.user?.user_id) {
-      console.log('LeadController: No user_id in req.user');
-      throw new UnauthorizedException('User not authenticated');
-    }
-    const redirectUrl = 'http://localhost:5000/auth/microsoft/test';
-    console.log('LeadController: Returning redirectUrl:', redirectUrl);
-    return { redirectUrl };
-  }
 }

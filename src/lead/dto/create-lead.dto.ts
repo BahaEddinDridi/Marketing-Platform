@@ -9,14 +9,14 @@ export enum LeadStatus {
 }
 
 export class CreateLeadDto {
-  lead_id: string;  
+  lead_id: string;
 
   @IsString()
   name: string;
 
   @IsString()
   @IsOptional()
-  phone?: string;  
+  phone?: string;
 
   @IsString()
   @IsOptional()
@@ -24,7 +24,7 @@ export class CreateLeadDto {
 
   @IsString()
   @IsOptional()
-  job_title?: string; 
+  job_title?: string;
 
   @IsEnum(LeadStatus)
   status: LeadStatus;
@@ -33,5 +33,8 @@ export class CreateLeadDto {
   email: string;
 
   @IsString()
-  source_platform: string; 
+  source_platform: string;
+  
+  @IsString()
+  userId: string;
 }

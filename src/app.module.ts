@@ -17,7 +17,6 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { PasswordResetModule } from './password-reset/password-reset.module';
 import { MicrosoftStrategy } from './strategies/microsoft.strategy';
 import { MicrosoftLeadsStrategy } from './strategies/microsoft-leads.strategy';
-import { MicrosoftTestStrategy } from './strategies/microsoft-test.strategy';
 
 @Module({
   imports: [
@@ -47,7 +46,6 @@ import { MicrosoftTestStrategy } from './strategies/microsoft-test.strategy';
     RefreshTokenStrategy,
     GoogleStrategy,
     MicrosoftStrategy,
-    MicrosoftTestStrategy
   ],
 })
 export class AppModule {}

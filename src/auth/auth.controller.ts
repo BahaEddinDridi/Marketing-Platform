@@ -155,7 +155,7 @@ export class AuthController {
   @Get('microsoft/leads/callback')
   @UseGuards(AuthGuard('microsoft-leads'))
   async microsoftLeadsCallback(@Req() req, @Res() res: Response) {
-    res.redirect('http://localhost:3000/leads'); 
+    res.redirect('http://localhost:3000/leads?auth=success'); 
   }
 
 }
