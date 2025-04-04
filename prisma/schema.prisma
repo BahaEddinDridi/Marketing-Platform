@@ -153,8 +153,9 @@ model Campaign {
   performances  CampaignPerformance[]
   created_at    DateTime              @default(now())
   updated_at    DateTime              @updatedAt
-}
+}//marketing_campaign
 
+//new model campaign (type) relation with leads
 model CampaignPerformance {
   performance_id String   @id @default(uuid())
   campaign       Campaign @relation(fields: [campaign_id], references: [campaign_id])

@@ -52,7 +52,6 @@ export class LeadService {
   }
 
   async fetchAndStoreLeads(userId: string) {
-    this.logger.log(`Starting fetchAndStoreLeads for userId: ${userId}`);
     const scopes = ['mail.read', 'offline_access'];
     const platformName = 'Microsoft';
 
@@ -71,18 +70,15 @@ export class LeadService {
     );
 
     if (!creds) {
-      this.logger.log('No credentials found');
       return { needsAuth: true, authUrl: '/auth/microsoft/leads' };
     }
 
     try {
       const token = await this.authService.getMicrosoftToken(userId, scopes);
-      this.logger.log('Token retrieved');
       const user = await this.prisma.user.findUnique({
         where: { user_id: userId },
       });
       if (!user) {
-        this.logger.error(`User ${userId} not found`);
         throw new Error('User not found');
       }
       const foldersToSync = [
@@ -98,7 +94,6 @@ export class LeadService {
             user_id_folderId_unique: { user_id: userId, folderId: folder.id },
           },
         });
-        this.logger.log(`Sync state for ${folder.name}:`, syncState);
 
         let url =
           syncState?.deltaLink ||
@@ -110,11 +105,6 @@ export class LeadService {
               $select: 'id,subject,from,receivedDateTime,bodyPreview',
               $filter: `receivedDateTime ge ${new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()}`,
             };
-
-        this.logger.log(
-          `Fetching from URL (${folder.name}): ${url} with params:`,
-          params,
-        );
 
         const response = await axios.get<GraphEmailResponse>(url, {
           headers: { Authorization: `Bearer ${token}` },
@@ -156,11 +146,8 @@ export class LeadService {
       const potentialLeads = allEmails.filter((email) =>
         this.isPotentialLead(email),
       );
-      this.logger.log(`Identified ${potentialLeads.length} potential leads`);
-
-      const storedLeads = await Promise.all(
-        potentialLeads.map(async (email) => {
-          const leadData = {
+      for (const email of potentialLeads) {
+        const leadData = {
             source_platform: platformName,
             name: email.from.emailAddress.name || 'Unknown',
             email: email.from.emailAddress.address,
@@ -169,30 +156,44 @@ export class LeadService {
             job_title: null,
             status: 'NEW' as const,
             created_at: new Date(email.receivedDateTime),
-          };
+        };
 
-          return this.prisma.lead.upsert({
+        const existingLead = await this.prisma.lead.findUnique({
             where: {
-              user_id_email_source_platform_unique: {
-                user_id: userId,
-                email: leadData.email,
-                source_platform: leadData.source_platform,
-              },
+                user_id_email_source_platform_unique: {
+                    user_id: userId,
+                    email: leadData.email,
+                    source_platform: leadData.source_platform,
+                },
             },
-            update: { ...leadData }, // Spread to exclude user for update
-            create: {
-              ...leadData,
-              user: { connect: { user_id: userId } }, // Connect user for create
-            },
-          });
-        }),
-      );
+        });
 
-      this.logger.log(`Stored ${storedLeads.length} leads`);
+        if (existingLead) {
+            await this.prisma.lead.update({
+                where: {
+                    user_id_email_source_platform_unique: {
+                        user_id: userId,
+                        email: leadData.email,
+                        source_platform: leadData.source_platform,
+                    },
+                },
+                data: { ...leadData },
+            });
+        } else {
+            await this.prisma.lead.create({
+                data: {
+                    ...leadData,
+                    user: { connect: { user_id: userId } },
+                },
+            });
+        }
+    }
+
+      this.logger.log(`Stored ${potentialLeads.length} leads`);
 
       return {
         needsAuth: false,
-        message: "Sync Successful",
+        message: 'Sync Successful',
       };
     } catch (error) {
       this.logger.error(
@@ -233,12 +234,11 @@ export class LeadService {
       throw new Error('Failed to fetch leads');
     }
   }
-  async updateLeadStatus(leadId: string, status ) {
+  async updateLeadStatus(leadId: string, status) {
     this.logger.log(`Updating lead ${leadId} to status: ${status}`);
     return this.prisma.lead.update({
       where: { lead_id: leadId },
       data: { status },
     });
   }
-
 }
