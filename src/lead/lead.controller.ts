@@ -10,6 +10,7 @@ import {
   Req,
   Res,
   UnauthorizedException,
+  Put,
 } from '@nestjs/common';
 import { LeadService } from './lead.service';
 import { CreateLeadDto } from './dto/create-lead.dto';
@@ -60,6 +61,15 @@ export class LeadController {
   async updateLeadStatus(@Req() req, @Body() body: { leadId: string; status: string }) {
     const { leadId, status } = body;
     return this.leadService.updateLeadStatus(leadId, status);
+  }
+
+  @Put(":leadId")
+  @UseGuards(JwtAuthGuard)
+  async updateLead(
+    @Param("leadId") leadId: string,
+    @Body() updateData: { name?: string; phone?: string | null; company?: string | null; jobTitle?: string | null }
+  ) {
+    return this.leadService.updateLead(leadId, updateData);
   }
 
   

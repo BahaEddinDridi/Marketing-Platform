@@ -120,7 +120,7 @@ model Lead {
   lead_id         String       @id @default(uuid())
   orgId           String
   organization    Organization @relation(fields: [orgId], references: [id])
-  assignedToId    String? // Optional assignment to a user
+  assignedToId    String?
   assignedTo      User?        @relation("AssignedTo", fields: [assignedToId], references: [user_id])
   source_platform String
   name            String
@@ -128,6 +128,7 @@ model Lead {
   phone           String?
   company         String?
   job_title       String?
+  leadEmail       LeadEmail?   @relation("LeadToEmail")
   status          LeadStatus
   created_at      DateTime     @default(now())
   updated_at      DateTime     @updatedAt
@@ -136,6 +137,21 @@ model Lead {
   @@index([orgId])
   @@index([source_platform])
 }
+model LeadEmail {
+  id              String   @id @default(uuid())
+  leadId          String   @unique 
+  lead            Lead     @relation("LeadToEmail", fields: [leadId], references: [lead_id])
+  subject         String
+  body            String   @db.Text   
+  hasAttachments  Boolean 
+  receivedDateTime DateTime 
+  emailId         String  
+  senderName      String?  
+  senderEmail     String   
+
+  @@index([leadId])
+}
+
 
 model SyncState {
   id           String   @id @default(uuid())

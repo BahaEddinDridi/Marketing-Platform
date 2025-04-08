@@ -9,7 +9,9 @@ interface GraphEmailResponse {
     id: string;
     from: { emailAddress: { address: string; name: string } };
     subject: string;
-    bodyPreview: string;
+    body?: { content: string; contentType: string }; // Optional body
+    bodyPreview?: string;
+    hasAttachments: boolean;
     receivedDateTime: string;
   }[];
   '@odata.deltaLink'?: string;
@@ -39,18 +41,25 @@ export class LeadService {
 
   private isPotentialLead(email: GraphEmailResponse['value'][0]): boolean {
     const subject = email.subject.toLowerCase();
-    const preview = email.bodyPreview.toLowerCase();
+    const preview = email.body?.content.toLowerCase();
 
     const leadKeywords = ['inquiry', 'interested', 'quote', 'sales', 'meeting'];
 
     return (
-      (leadKeywords.some((kw) => subject.includes(kw)) ||
-        leadKeywords.some((kw) => preview.includes(kw)))
+      leadKeywords.some((kw) => subject.includes(kw)) ||
+      leadKeywords.some((kw) => preview?.includes(kw))
     );
   }
 
   async fetchAndStoreLeads(orgId: string) {
-    const scopes = ['openid', 'profile', 'email', 'User.Read', 'Mail.Read', 'offline_access'];
+    const scopes = [
+      'openid',
+      'profile',
+      'email',
+      'User.Read',
+      'Mail.Read',
+      'offline_access',
+    ];
     const platformName = 'Microsoft';
 
     const platform = await this.prisma.marketingPlatform.findFirst({
@@ -60,7 +69,10 @@ export class LeadService {
 
     if (!platform) {
       this.logger.log('No platform found');
-      return { needsAuth: true, authUrl: 'http://localhost:5000/auth/microsoft' };
+      return {
+        needsAuth: true,
+        authUrl: 'http://localhost:5000/auth/microsoft',
+      };
     }
 
     const creds = platform.credentials.find((cred) =>
@@ -68,7 +80,10 @@ export class LeadService {
     );
 
     if (!creds) {
-      return { needsAuth: true, authUrl: 'http://localhost:5000/auth/microsoft' };
+      return {
+        needsAuth: true,
+        authUrl: 'http://localhost:5000/auth/microsoft',
+      };
     }
 
     try {
@@ -105,7 +120,7 @@ export class LeadService {
           ? {}
           : {
               $top: 50,
-              $select: 'id,subject,from,receivedDateTime,bodyPreview',
+              $select: 'id,subject,from,receivedDateTime,body,bodyPreview',
               $filter: `receivedDateTime ge ${new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()}`,
             };
 
@@ -118,11 +133,16 @@ export class LeadService {
           `Graph API response (${folder.name}):`,
           JSON.stringify(response.data),
         );
-        this.logger.log(
-          `allEmails`,
-          allEmails,
-        );
+        if (response.data.value.length > 0) {
+          this.logger.log(
+            `First email sample (${folder.name}):`,
+            JSON.stringify(response.data.value[0]),
+          );
+        }
+
         allEmails = allEmails.concat(response.data.value);
+        this.logger.log(`allEmails`, allEmails);
+
         this.logger.log(
           `Fetched ${response.data.value.length} emails from ${folder.name}`,
         );
@@ -166,6 +186,16 @@ export class LeadService {
           created_at: new Date(email.receivedDateTime),
         };
 
+        const emailData = {
+          subject: email.subject || 'No Subject',
+          body: email.body?.content || email.bodyPreview || '',
+          hasAttachments: email.hasAttachments || false,
+          receivedDateTime: new Date(email.receivedDateTime),
+          emailId: email.id,
+          senderName: email.from.emailAddress.name || null,
+          senderEmail: email.from.emailAddress.address,
+        };
+
         const existingLead = await this.prisma.lead.findUnique({
           where: {
             org_id_email_source_platform_unique: {
@@ -181,8 +211,22 @@ export class LeadService {
             where: { lead_id: existingLead.lead_id },
             data: leadData,
           });
+          await this.prisma.leadEmail.upsert({
+            where: { leadId: existingLead.lead_id },
+            update: emailData,
+            create: {
+              ...emailData,
+              leadId: existingLead.lead_id,
+            },
+          });
         } else {
-          await this.prisma.lead.create({ data: leadData });
+          const newLead = await this.prisma.lead.create({ data: leadData });
+          await this.prisma.leadEmail.create({
+            data: {
+              ...emailData,
+              leadId: newLead.lead_id,
+            },
+          });
         }
       }
 
@@ -198,11 +242,14 @@ export class LeadService {
         error.message,
         error.response?.data,
       );
-      return { needsAuth: true, authUrl: 'http://localhost:5000/auth/microsoft' };
+      return {
+        needsAuth: true,
+        authUrl: 'http://localhost:5000/auth/microsoft',
+      };
     }
   }
 
-  @Cron(CronExpression.EVERY_HOUR)
+  @Cron(CronExpression.EVERY_10_SECONDS)
   async syncLeadsForAllOrganizations() {
     this.logger.log('Starting hourly lead sync for all organizations');
 
@@ -218,14 +265,20 @@ export class LeadService {
         if (result.needsAuth) {
           this.logger.warn(`Org ${org.id} needs re-authentication`);
         } else {
-          this.logger.log(`Sync completed for orgId: ${org.id} - ${result.message}`);
+          this.logger.log(
+            `Sync completed for orgId: ${org.id} - ${result.message}`,
+          );
         }
       }
     } catch (error) {
-      this.logger.error('Error in hourly lead sync:', error.message, error.stack);
+      this.logger.error(
+        'Error in hourly lead sync:',
+        error.message,
+        error.stack,
+      );
     }
   }
-  
+
   async fetchLeadsByUserId(orgId: string) {
     this.logger.log(`Fetching leads for userId: ${orgId}`);
 
@@ -233,6 +286,7 @@ export class LeadService {
       const leads = await this.prisma.lead.findMany({
         where: { orgId },
         orderBy: { created_at: 'desc' },
+        include: { leadEmail: true },
       });
 
       this.logger.log(`Fetched ${leads.length} leads for userId: ${orgId}`);
@@ -248,6 +302,17 @@ export class LeadService {
           jobTitle: lead.job_title,
           status: lead.status,
           createdAt: lead.created_at.toISOString(),
+          emailData: lead.leadEmail
+            ? {
+                subject: lead.leadEmail.subject,
+                body: lead.leadEmail.body,
+                hasAttachments: lead.leadEmail.hasAttachments,
+                receivedDateTime: lead.leadEmail.receivedDateTime.toISOString(),
+                emailId: lead.leadEmail.emailId,
+                senderName: lead.leadEmail.senderName,
+                senderEmail: lead.leadEmail.senderEmail,
+              }
+            : null,
         })),
       };
     } catch (error) {
@@ -261,5 +326,59 @@ export class LeadService {
       where: { lead_id: leadId },
       data: { status },
     });
+  }
+  async updateLead(
+    leadId: string,
+    data: {
+      name?: string;
+      phone?: string | null;
+      company?: string | null;
+      jobTitle?: string | null;
+    },
+  ) {
+    this.logger.log(
+      `Updating lead ${leadId} with data: ${JSON.stringify(data)}`,
+    );
+
+    try {
+      const updatedLead = await this.prisma.lead.update({
+        where: { lead_id: leadId },
+        data: {
+          name: data.name,
+          phone: data.phone,
+          company: data.company,
+          job_title: data.jobTitle,
+        },
+        include: { leadEmail: true },
+      });
+
+      this.logger.log(`Lead ${leadId} updated successfully`);
+      return {
+        leadId: updatedLead.lead_id,
+        sourcePlatform: updatedLead.source_platform,
+        name: updatedLead.name,
+        email: updatedLead.email,
+        phone: updatedLead.phone,
+        company: updatedLead.company,
+        jobTitle: updatedLead.job_title,
+        status: updatedLead.status,
+        createdAt: updatedLead.created_at.toISOString(),
+        emailData: updatedLead.leadEmail
+          ? {
+              subject: updatedLead.leadEmail.subject,
+              body: updatedLead.leadEmail.body,
+              hasAttachments: updatedLead.leadEmail.hasAttachments,
+              receivedDateTime:
+                updatedLead.leadEmail.receivedDateTime.toISOString(),
+              emailId: updatedLead.leadEmail.emailId,
+              senderName: updatedLead.leadEmail.senderName,
+              senderEmail: updatedLead.leadEmail.senderEmail,
+            }
+          : null,
+      };
+    } catch (error) {
+      this.logger.error(`Error updating lead ${leadId}:`, error.message);
+      throw new Error('Failed to update lead');
+    }
   }
 }
