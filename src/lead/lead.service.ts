@@ -249,7 +249,7 @@ export class LeadService {
     }
   }
 
-  @Cron(CronExpression.EVERY_10_SECONDS)
+  @Cron(CronExpression.EVERY_HOUR)
   async syncLeadsForAllOrganizations() {
     this.logger.log('Starting hourly lead sync for all organizations');
 
