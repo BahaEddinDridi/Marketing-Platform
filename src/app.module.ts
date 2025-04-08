@@ -17,9 +17,12 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { PasswordResetModule } from './password-reset/password-reset.module';
 import { MicrosoftStrategy } from './strategies/microsoft.strategy';
 import { MicrosoftLeadsStrategy } from './strategies/microsoft-leads.strategy';
+import { OrganizationModule } from './organization/organization.module';
+import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
   imports: [
+    ScheduleModule.forRoot(),
     LeadModule,
     AuthModule,
     UsersModule,
@@ -37,6 +40,7 @@ import { MicrosoftLeadsStrategy } from './strategies/microsoft-leads.strategy';
     CampaignsModule,
     AnalyticsModule,
     PasswordResetModule,
+    OrganizationModule,
   ],
   controllers: [AppController],
   providers: [

@@ -5,6 +5,7 @@ import { PrismaModule } from 'src/prisma/prisma.module';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { MicrosoftLeadsStrategy } from 'src/strategies/microsoft-leads.strategy';
+import { OrganizationModule } from 'src/organization/organization.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { MicrosoftLeadsStrategy } from 'src/strategies/microsoft-leads.strategy'
       secret: process.env.JWT_SECRET,
       signOptions: { expiresIn: '1h' },
     }),
+    OrganizationModule
   ],
   controllers: [AuthController],
   providers: [AuthService, MicrosoftLeadsStrategy],

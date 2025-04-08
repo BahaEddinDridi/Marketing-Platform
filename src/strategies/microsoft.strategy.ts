@@ -14,43 +14,39 @@ export class MicrosoftStrategy extends PassportStrategy(Strategy, 'microsoft') {
       clientID: configService.get('MICROSOFT_CLIENT_ID'),
       clientSecret: configService.get('MICROSOFT_CLIENT_SECRET'),
       callbackURL: configService.get('MICROSOFT_REDIRECT_URI'),
-      scope: ['user.read', 'offline_access'], 
+      scope: ['openid', 'profile', 'email', 'User.Read', 'Mail.Read', 'offline_access'],
       tenant: 'common',
-      passReqToCallback: true, 
     });
   }
 
-  async validate(
-    req: any,
-    accessToken: string,
-    refreshToken: string,
-    profile: Profile,
-    done: Function,
-  ) {
+  async validate(accessToken: string, refreshToken: string, profile: Profile, done: Function) {
     const { id, displayName, emails, _json } = profile;
-    const email = emails?.[0]?.value || profile._json.mail || null; 
-    const firstName = _json.givenName || displayName?.split(' ')[0] || null;
-    const lastName = _json.surname || displayName?.split(' ')[1] || null;
-    const jobTitle = _json.jobTitle || null;
-    const phoneNumber = _json.mobilePhone || null;
-    const expiresIn = req.authInfo?.expires_in || 3600; 
-    const scopes = ['user.read', 'offline_access'];
-    const userData = await this.authService.validateMicrosoftUser(
-      id,
-      email,
-      firstName,
-      lastName,
-      jobTitle,
-      phoneNumber,
-      refreshToken,
-      accessToken,
-      expiresIn,
-      scopes,
-    );
+    const email = emails?.[0]?.value || _json.mail;
+    if (!email) return done(new Error('No email found'), null);
 
-    return done(null, {
-      user: userData.user,
-      tokens: userData.tokens,
-    });
+    const firstName = _json.givenName || displayName?.split(' ')[0] || '';
+    const lastName = _json.surname || displayName?.split(' ')[1] || '';
+    const jobTitle = _json.jobTitle || '';
+    const phoneNumber = _json.mobilePhone || '';
+    const expiresIn = _json.expires_in || 3600;
+    const scopes = ['openid', 'profile', 'email', 'User.Read', 'Mail.Read', 'offline_access'];
+
+    try {
+      const userData = await this.authService.validateMicrosoftUser(
+        id,
+        email,
+        firstName,
+        lastName,
+        jobTitle,
+        phoneNumber,
+        refreshToken,
+        accessToken,
+        expiresIn,
+        scopes,
+      );
+      return done(null, userData);
+    } catch (error) {
+      return done(error, null);
+    }
   }
 }

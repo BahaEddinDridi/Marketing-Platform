@@ -18,16 +18,18 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         },
       ]),
       secretOrKey: configService.get<string>('JWT_SECRET'),
+      ignoreExpiration: false, // Ensure token expiration is checked
     });
   }
 
-  async validate(payload: any) {
+  async validate(payload: { sub: string; email: string; orgId: string }) {
     const user = await this.prisma.user.findUnique({
       where: { user_id: payload.sub },
     });
     if (!user) {
       throw new Error('User not found');
     }
-    return { user_id: user.user_id, email: user.email };
+    // Return user_id, email, and orgId to match AuthenticatedRequest
+    return { user_id: user.user_id, email: user.email, orgId: user.orgId };
   }
 }

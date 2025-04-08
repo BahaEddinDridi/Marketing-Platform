@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { AuthService } from 'src/auth/auth.service';
 import axios from 'axios';
+import { Cron, CronExpression } from '@nestjs/schedule';
 
 interface GraphEmailResponse {
   value: {
@@ -37,32 +38,29 @@ export class LeadService {
   }
 
   private isPotentialLead(email: GraphEmailResponse['value'][0]): boolean {
-    const senderEmail = email.from.emailAddress.address.toLowerCase();
     const subject = email.subject.toLowerCase();
     const preview = email.bodyPreview.toLowerCase();
 
-    const internalDomains = ['@yourcompany.com'];
     const leadKeywords = ['inquiry', 'interested', 'quote', 'sales', 'meeting'];
 
     return (
-      !internalDomains.some((domain) => senderEmail.endsWith(domain)) &&
       (leadKeywords.some((kw) => subject.includes(kw)) ||
         leadKeywords.some((kw) => preview.includes(kw)))
     );
   }
 
-  async fetchAndStoreLeads(userId: string) {
-    const scopes = ['mail.read', 'offline_access'];
+  async fetchAndStoreLeads(orgId: string) {
+    const scopes = ['openid', 'profile', 'email', 'User.Read', 'Mail.Read', 'offline_access'];
     const platformName = 'Microsoft';
 
     const platform = await this.prisma.marketingPlatform.findFirst({
-      where: { user_id: userId, platform_name: platformName },
+      where: { orgId, platform_name: platformName },
       include: { credentials: true },
     });
 
     if (!platform) {
       this.logger.log('No platform found');
-      return { needsAuth: true, authUrl: '/auth/microsoft/leads' };
+      return { needsAuth: true, authUrl: 'http://localhost:5000/auth/microsoft' };
     }
 
     const creds = platform.credentials.find((cred) =>
@@ -70,17 +68,22 @@ export class LeadService {
     );
 
     if (!creds) {
-      return { needsAuth: true, authUrl: '/auth/microsoft/leads' };
+      return { needsAuth: true, authUrl: 'http://localhost:5000/auth/microsoft' };
     }
 
     try {
-      const token = await this.authService.getMicrosoftToken(userId, scopes);
-      const user = await this.prisma.user.findUnique({
-        where: { user_id: userId },
+      const token = await this.authService.getMicrosoftToken(orgId, scopes);
+      const org = await this.prisma.organization.findUnique({
+        where: { id: orgId },
+        select: { sharedMailbox: true },
       });
-      if (!user) {
-        throw new Error('User not found');
+      if (!org || !org.sharedMailbox) {
+        this.logger.error(`No shared mailbox found for orgId: ${orgId}`);
+        throw new Error('Shared mailbox not configured for this organization');
       }
+      const sharedMailbox = org.sharedMailbox;
+      this.logger.log(`Fetching emails from shared mailbox: ${sharedMailbox}`);
+
       const foldersToSync = [
         { name: 'Inbox', id: 'inbox' },
         { name: 'Junk', id: 'junkemail' },
@@ -91,13 +94,13 @@ export class LeadService {
       for (const folder of foldersToSync) {
         const syncState = await this.prisma.syncState.findUnique({
           where: {
-            user_id_folderId_unique: { user_id: userId, folderId: folder.id },
+            orgId_folderId_unique: { orgId: orgId, folderId: folder.id },
           },
         });
 
         let url =
           syncState?.deltaLink ||
-          `https://graph.microsoft.com/v1.0/me/mailFolders/${folder.id}/messages/delta`;
+          `https://graph.microsoft.com/v1.0/users/${sharedMailbox}/mailFolders/${folder.id}/messages/delta`;
         const params = syncState?.deltaLink
           ? {}
           : {
@@ -115,6 +118,10 @@ export class LeadService {
           `Graph API response (${folder.name}):`,
           JSON.stringify(response.data),
         );
+        this.logger.log(
+          `allEmails`,
+          allEmails,
+        );
         allEmails = allEmails.concat(response.data.value);
         this.logger.log(
           `Fetched ${response.data.value.length} emails from ${folder.name}`,
@@ -123,14 +130,14 @@ export class LeadService {
         if (response.data['@odata.deltaLink']) {
           await this.prisma.syncState.upsert({
             where: {
-              user_id_folderId_unique: { user_id: userId, folderId: folder.id },
+              orgId_folderId_unique: { orgId: orgId, folderId: folder.id },
             },
             update: {
               deltaLink: response.data['@odata.deltaLink'],
               lastSyncedAt: new Date(),
             },
             create: {
-              user_id: userId,
+              orgId: orgId,
               platform: platformName,
               folderId: folder.id,
               deltaLink: response.data['@odata.deltaLink'],
@@ -148,46 +155,36 @@ export class LeadService {
       );
       for (const email of potentialLeads) {
         const leadData = {
-            source_platform: platformName,
-            name: email.from.emailAddress.name || 'Unknown',
-            email: email.from.emailAddress.address,
-            phone: null,
-            company: null,
-            job_title: null,
-            status: 'NEW' as const,
-            created_at: new Date(email.receivedDateTime),
+          orgId,
+          source_platform: platformName,
+          name: email.from.emailAddress.name || 'Unknown',
+          email: email.from.emailAddress.address,
+          phone: null,
+          company: null,
+          job_title: null,
+          status: 'NEW' as const,
+          created_at: new Date(email.receivedDateTime),
         };
 
         const existingLead = await this.prisma.lead.findUnique({
-            where: {
-                user_id_email_source_platform_unique: {
-                    user_id: userId,
-                    email: leadData.email,
-                    source_platform: leadData.source_platform,
-                },
+          where: {
+            org_id_email_source_platform_unique: {
+              orgId,
+              email: leadData.email,
+              source_platform: leadData.source_platform,
             },
+          },
         });
 
         if (existingLead) {
-            await this.prisma.lead.update({
-                where: {
-                    user_id_email_source_platform_unique: {
-                        user_id: userId,
-                        email: leadData.email,
-                        source_platform: leadData.source_platform,
-                    },
-                },
-                data: { ...leadData },
-            });
+          await this.prisma.lead.update({
+            where: { lead_id: existingLead.lead_id },
+            data: leadData,
+          });
         } else {
-            await this.prisma.lead.create({
-                data: {
-                    ...leadData,
-                    user: { connect: { user_id: userId } },
-                },
-            });
+          await this.prisma.lead.create({ data: leadData });
         }
-    }
+      }
 
       this.logger.log(`Stored ${potentialLeads.length} leads`);
 
@@ -201,20 +198,44 @@ export class LeadService {
         error.message,
         error.response?.data,
       );
-      return { needsAuth: true, authUrl: '/auth/microsoft/leads' };
+      return { needsAuth: true, authUrl: 'http://localhost:5000/auth/microsoft' };
     }
   }
 
-  async fetchLeadsByUserId(userId: string) {
-    this.logger.log(`Fetching leads for userId: ${userId}`);
+  @Cron(CronExpression.EVERY_HOUR)
+  async syncLeadsForAllOrganizations() {
+    this.logger.log('Starting hourly lead sync for all organizations');
+
+    try {
+      const organizations = await this.prisma.organization.findMany({
+        select: { id: true },
+      });
+      this.logger.log(`Found ${organizations.length} organizations to sync`);
+
+      for (const org of organizations) {
+        this.logger.log(`Syncing leads for orgId: ${org.id}`);
+        const result = await this.fetchAndStoreLeads(org.id);
+        if (result.needsAuth) {
+          this.logger.warn(`Org ${org.id} needs re-authentication`);
+        } else {
+          this.logger.log(`Sync completed for orgId: ${org.id} - ${result.message}`);
+        }
+      }
+    } catch (error) {
+      this.logger.error('Error in hourly lead sync:', error.message, error.stack);
+    }
+  }
+  
+  async fetchLeadsByUserId(orgId: string) {
+    this.logger.log(`Fetching leads for userId: ${orgId}`);
 
     try {
       const leads = await this.prisma.lead.findMany({
-        where: { user_id: userId },
+        where: { orgId },
         orderBy: { created_at: 'desc' },
       });
 
-      this.logger.log(`Fetched ${leads.length} leads for userId: ${userId}`);
+      this.logger.log(`Fetched ${leads.length} leads for userId: ${orgId}`);
 
       return {
         leads: leads.map((lead) => ({

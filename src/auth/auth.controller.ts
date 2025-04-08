@@ -16,6 +16,7 @@ import { RefreshTokenGuard } from 'src/guards/refresh-token.guard';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
 import { AuthGuard } from '@nestjs/passport';
 import { Response, Request } from 'express';
+import { PrismaService } from 'src/prisma/prisma.service';
 
 interface AuthenticatedRequest extends Request {
   user?: { user_id: string; email: string };
@@ -23,11 +24,20 @@ interface AuthenticatedRequest extends Request {
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private prisma: PrismaService,
+    private readonly authService: AuthService,
+  ) {}
 
   @Post('register')
   async register(@Body() registerDto: RegisterDto) {
-    return this.authService.register(registerDto);
+    const { user, tokens } = await this.authService.register(registerDto);
+    return {
+      message: 'User registered successfully',
+      user: { user_id: user.user_id, email: user.email, orgId: user.orgId },
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    };
   }
 
   @Post('sign-in')
@@ -62,7 +72,7 @@ export class AuthController {
   @UseGuards(RefreshTokenGuard)
   async refresh(@Req() req: AuthenticatedRequest, @Res() res: Response) {
     const refreshToken = req.cookies['refreshToken'];
-    const user = req.user as { user_id: string; email: string };
+    const user = req.user as { user_id: string; email: string; orgId: string };
     const userId = user.user_id;
 
     const tokens = await this.authService.refreshToken(userId, refreshToken);
@@ -87,7 +97,7 @@ export class AuthController {
   @Post('logout')
   @UseGuards(JwtAuthGuard)
   async logout(@Req() req: AuthenticatedRequest, @Res() res: Response) {
-    const user = req.user as { user_id: string; email: string };
+    const user = req.user as { user_id: string; email: string; orgId: string };
     const user_id = user.user_id;
 
     await this.authService.logout(user_id);
@@ -99,7 +109,7 @@ export class AuthController {
   @Get('check')
   @UseGuards(JwtAuthGuard)
   async checkAuth(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string };
+    const user = req.user as { user_id: string; email: string; orgId: string };
     return { user };
   }
 
@@ -113,24 +123,17 @@ export class AuthController {
 
   @Get('google/redirect')
   @UseGuards(AuthGuard('google'))
-  async googleAuthRedirect(@Req() req) {
-    return this.authService.generateTokens(req.user.user_id, req.user.email);
-  }
+  async googleAuthRedirect(
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+  ) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    const tokens = await this.authService.generateTokens(
+      user.user_id,
+      user.email,
+      user.orgId,
+    );
 
-  ///////////////////////// MICROSOFT ////////////////////////
-
-  @Get('microsoft')
-  @UseGuards(AuthGuard('microsoft'))
-  async microsoftLogin() {
-  }
-
-  @Get('microsoft/callback')
-  @UseGuards(AuthGuard('microsoft'))
-  async microsoftLoginCallback(@Req() req, @Res() res: Response) {
-    const {
-      user,
-      tokens,
-    } = req.user;
     res.cookie('accessToken', tokens.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -144,18 +147,47 @@ export class AuthController {
       sameSite: 'strict',
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
-    res.redirect('http://localhost:3000/signin?callback=microsoft');
+
+    res.redirect('http://localhost:3000/signin?callback=google');
+  }
+
+  ///////////////////////// MICROSOFT ////////////////////////
+
+  @Get('microsoft')
+  @UseGuards(AuthGuard('microsoft'))
+  async microsoftLogin() {}
+
+  @Get('microsoft/callback')
+  @UseGuards(AuthGuard('microsoft'))
+  async microsoftLoginCallback(@Req() req, @Res() res: Response) {
+    const { user, tokens, isNewOrg } = req.user;
+    res.cookie('accessToken', tokens.accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000,
+    });
+
+    res.cookie('refreshToken', tokens.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    const redirectUrl = isNewOrg
+      ? `http://localhost:3000/signin?callback=microsoft&orgId=${user.orgId}`
+      : 'http://localhost:3000/signin?callback=microsoft';
+    res.redirect(redirectUrl);
   }
 
   @Get('microsoft/leads')
   @UseGuards(AuthGuard('microsoft-leads'))
-  async microsoftLeadsLogin() {
-  }
+  async microsoftLeadsLogin() {}
 
   @Get('microsoft/leads/callback')
   @UseGuards(AuthGuard('microsoft-leads'))
   async microsoftLeadsCallback(@Req() req, @Res() res: Response) {
-    res.redirect('http://localhost:3000/leads?auth=success'); 
+    res.redirect('http://localhost:3000/leads?auth=success');
   }
-
 }

@@ -24,33 +24,46 @@ enum Status {
   DELETED
 }
 
+model Organization {
+  id         String              @id @default(uuid())
+  name       String
+  tenantId   String?
+  sharedMailbox String?
+  users      User[]
+  leads      Lead[]
+  platforms  MarketingPlatform[]
+  created_at DateTime            @default(now())
+  updated_at DateTime            @updatedAt
+}
+
 model User {
-  user_id            String               @id @default(uuid())
-  firstName          String?
-  lastName           String?
-  email              String               @unique
-  password           String
-  phoneNumber        String?
-  street             String?
-  city               String?
-  state              String?
-  zipCode            String?
-  country            String?
-  birthdate          DateTime?
-  occupation         String?
-  profileImage       String?
-  lastLogin          DateTime?
-  profilePicture     String?
-  role               Role                 @default(USER)
-  status             Status               @default(ACTIVE)
-  refreshToken       String?
-  googleId           String?              @unique
-  microsoftId        String?              @unique
-  marketingPlatforms MarketingPlatform[]
-  leads              Lead[]
-  password_tokens    PasswordResetToken[]
-  created_at         DateTime             @default(now())
-  updated_at         DateTime             @updatedAt
+  user_id         String               @id @default(uuid())
+  firstName       String?
+  lastName        String?
+  email           String               @unique
+  password        String
+  orgId           String
+  organization    Organization         @relation(fields: [orgId], references: [id])
+  phoneNumber     String?
+  street          String?
+  city            String?
+  state           String?
+  zipCode         String?
+  country         String?
+  birthdate       DateTime?
+  occupation      String?
+  profileImage    String?
+  lastLogin       DateTime?
+  profilePicture  String?
+  role            Role                 @default(USER)
+  status          Status               @default(ACTIVE)
+  refreshToken    String?
+  googleId        String?              @unique
+  microsoftId     String?              @unique
+  assignedLeads   Lead[]               @relation("AssignedTo")
+  password_tokens PasswordResetToken[]
+  created_at      DateTime             @default(now())
+  updated_at      DateTime             @updatedAt
 }
 
 model PasswordResetToken {
@@ -71,8 +84,8 @@ enum SyncStatus {
 model MarketingPlatform {
   platform_id    String                @id @default(uuid())
   platform_name  String
-  user_id        String
-  user           User                  @relation(fields: [user_id], references: [user_id])
+  orgId          String
+  organization   Organization          @relation(fields: [orgId], references: [id])
   last_sync_time DateTime?
   sync_status    SyncStatus            @default(CONNECTED)
   campaigns      Campaign[]
@@ -80,7 +93,7 @@ model MarketingPlatform {
   created_at     DateTime              @default(now())
   updated_at     DateTime              @updatedAt
 
-  @@unique([user_id, platform_name])
+  @@unique([orgId, platform_name])
 }
 
 model PlatformCredentials {
@@ -104,8 +117,11 @@ enum LeadStatus {
 }
 
 model Lead {
-  lead_id         String     @id @default(uuid())
-  user_id         String
+  lead_id         String       @id @default(uuid())
+  orgId           String
+  organization    Organization @relation(fields: [orgId], references: [id])
+  assignedToId    String? // Optional assignment to a user
+  assignedTo      User?        @relation("AssignedTo", fields: [assignedToId], references: [user_id])
   source_platform String
   name            String
   email           String
@@ -113,26 +129,24 @@ model Lead {
   company         String?
   job_title       String?
   status          LeadStatus
-  created_at      DateTime   @default(now())
-  updated_at      DateTime   @updatedAt
+  created_at      DateTime     @default(now())
+  updated_at      DateTime     @updatedAt
 
-  user User @relation(fields: [user_id], references: [user_id])
-
-  @@unique([user_id, email, source_platform], name: "user_id_email_source_platform_unique")
-  @@index([user_id])
+  @@unique([orgId, email, source_platform], name: "org_id_email_source_platform_unique")
+  @@index([orgId])
   @@index([source_platform])
 }
 
 model SyncState {
   id           String   @id @default(uuid())
-  user_id      String
+  orgId        String
   platform     String
   folderId     String
   deltaLink    String
   lastSyncedAt DateTime @default(now()) @updatedAt
 
-  @@unique([user_id, folderId], name: "user_id_folderId_unique")
-  @@index([user_id])
+  @@unique([orgId, folderId], name: "orgId_folderId_unique")
+  @@index([orgId])
 }
 
 enum CampaignStatus {
@@ -153,7 +167,8 @@ model Campaign {
   performances  CampaignPerformance[]
   created_at    DateTime              @default(now())
   updated_at    DateTime              @updatedAt
-}//marketing_campaign
+}
+//marketing_campaign
 
 //new model campaign (type) relation with leads
 model CampaignPerformance {

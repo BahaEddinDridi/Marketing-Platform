@@ -14,8 +14,10 @@ export class MicrosoftLeadsStrategy extends PassportStrategy(Strategy, 'microsof
       clientID: configService.get('MICROSOFT_CLIENT_ID'),
       clientSecret: configService.get('MICROSOFT_CLIENT_SECRET'),
       callbackURL: configService.get('MICROSOFT_LEADS_REDIRECT_URI'),
-      scope: ['mail.read', 'offline_access'],
+      scope: ['mail.read','user.read', 'offline_access'],
       tenant: 'common',
+      authorizationURL: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+      tokenURL: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
       passReqToCallback: true,
     });
   }
@@ -30,7 +32,7 @@ export class MicrosoftLeadsStrategy extends PassportStrategy(Strategy, 'microsof
     const { id, emails, _json } = profile;
     const email = emails?.[0]?.value || _json.mail || null;
     const expiresIn = req.authInfo?.expires_in || 3600;
-    const scopes = ['mail.read', 'offline_access'];
+    const scopes = ['mail.read','user.read', 'offline_access'];
     const userId = req.user?.user_id || id;
     await this.authService.updateMicrosoftCredentials(
       id,

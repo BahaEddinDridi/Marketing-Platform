@@ -36,10 +36,10 @@ export class LeadController {
   @Get('fetch')
   @UseGuards(JwtAuthGuard)
   async fetchEmails(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string };
-    const user_id = user.user_id;
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    const org_id = user.orgId;
     try {
-      const result = await this.leadService.fetchAndStoreLeads(user_id);
+      const result = await this.leadService.fetchAndStoreLeads(org_id);
       return result || { error: 'No data returned from service' };
     } catch (error) {
       console.error('LeadController: Error:', error.message);
@@ -50,9 +50,9 @@ export class LeadController {
   @Get('getByUserId')
   @UseGuards(JwtAuthGuard)
   async getByUserId(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string };
-    const user_id = user.user_id;
-    return this.leadService.fetchLeadsByUserId(user_id);
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    const org_id = user.orgId;
+    return this.leadService.fetchLeadsByUserId(org_id);
   }
 
   @Post('update-status')
