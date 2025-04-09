@@ -25,45 +25,46 @@ enum Status {
 }
 
 model Organization {
-  id         String              @id @default(uuid())
-  name       String
-  tenantId   String?
+  id            String              @id @default(uuid())
+  name          String
+  tenantId      String?
   sharedMailbox String?
-  users      User[]
-  leads      Lead[]
-  platforms  MarketingPlatform[]
-  created_at DateTime            @default(now())
-  updated_at DateTime            @updatedAt
+  users         User[]
+  leads         Lead[]
+  platforms     MarketingPlatform[]
+  created_at    DateTime            @default(now())
+  updated_at    DateTime            @updatedAt
 }
 
 model User {
-  user_id         String               @id @default(uuid())
-  firstName       String?
-  lastName        String?
-  email           String               @unique
-  password        String
-  orgId           String
-  organization    Organization         @relation(fields: [orgId], references: [id])
-  phoneNumber     String?
-  street          String?
-  city            String?
-  state           String?
-  zipCode         String?
-  country         String?
-  birthdate       DateTime?
-  occupation      String?
-  profileImage    String?
-  lastLogin       DateTime?
-  profilePicture  String?
-  role            Role                 @default(USER)
-  status          Status               @default(ACTIVE)
-  refreshToken    String?
-  googleId        String?              @unique
-  microsoftId     String?              @unique
-  assignedLeads   Lead[]               @relation("AssignedTo")
-  password_tokens PasswordResetToken[]
-  created_at      DateTime             @default(now())
-  updated_at      DateTime             @updatedAt
+  user_id                String               @id @default(uuid())
+  firstName              String?
+  lastName               String?
+  email                  String               @unique
+  password               String
+  orgId                  String
+  organization           Organization         @relation(fields: [orgId], references: [id])
+  phoneNumber            String?
+  street                 String?
+  city                   String?
+  state                  String?
+  zipCode                String?
+  country                String?
+  birthdate              DateTime?
+  occupation             String?
+  profileImage           String?
+  lastLogin              DateTime?
+  profilePicture         String?
+  role                   Role                 @default(USER)
+  status                 Status               @default(ACTIVE)
+  refreshToken           String?
+  googleId               String?              @unique
+  microsoftId            String?              @unique
+  allowPersonalEmailSync Boolean              @default(false)
+  assignedLeads          Lead[]               @relation("AssignedTo")
+  password_tokens        PasswordResetToken[]
+  created_at             DateTime             @default(now())
+  updated_at             DateTime             @updatedAt
 }
 
 model PasswordResetToken {
@@ -137,21 +138,21 @@ model Lead {
   @@index([orgId])
   @@index([source_platform])
 }
+
 model LeadEmail {
-  id              String   @id @default(uuid())
-  leadId          String   @unique 
-  lead            Lead     @relation("LeadToEmail", fields: [leadId], references: [lead_id])
-  subject         String
-  body            String   @db.Text   
-  hasAttachments  Boolean 
-  receivedDateTime DateTime 
-  emailId         String  
-  senderName      String?  
-  senderEmail     String   
+  id               String   @id @default(uuid())
+  leadId           String   @unique
+  lead             Lead     @relation("LeadToEmail", fields: [leadId], references: [lead_id])
+  subject          String
+  body             String   @db.Text
+  hasAttachments   Boolean
+  receivedDateTime DateTime
+  emailId          String
+  senderName       String?
+  senderEmail      String
 
   @@index([leadId])
 }
-
 
 model SyncState {
   id           String   @id @default(uuid())
@@ -184,6 +185,7 @@ model Campaign {
   created_at    DateTime              @default(now())
   updated_at    DateTime              @updatedAt
 }
+
 //marketing_campaign
 
 //new model campaign (type) relation with leads

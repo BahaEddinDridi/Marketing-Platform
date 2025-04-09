@@ -61,33 +61,35 @@ export class LeadService {
       'offline_access',
     ];
     const platformName = 'Microsoft';
-
+  
     const platform = await this.prisma.marketingPlatform.findFirst({
       where: { orgId, platform_name: platformName },
       include: { credentials: true },
     });
-
+  
     if (!platform) {
-      this.logger.log('No platform found');
+      this.logger.log('No platform found—time to get connected');
       return {
         needsAuth: true,
         authUrl: 'http://localhost:5000/auth/microsoft',
       };
     }
-
+  
     const creds = platform.credentials.find((cred) =>
       scopes.every((scope) => cred.scopes.includes(scope)),
     );
-
+  
     if (!creds) {
+      this.logger.log('Missing creds—let’s fix that glow-up!');
       return {
         needsAuth: true,
         authUrl: 'http://localhost:5000/auth/microsoft',
       };
     }
-
+  
     try {
       const token = await this.authService.getMicrosoftToken(orgId, scopes);
+  
       const org = await this.prisma.organization.findUnique({
         where: { id: orgId },
         select: { sharedMailbox: true },
@@ -97,95 +99,123 @@ export class LeadService {
         throw new Error('Shared mailbox not configured for this organization');
       }
       const sharedMailbox = org.sharedMailbox;
-      this.logger.log(`Fetching emails from shared mailbox: ${sharedMailbox}`);
-
+  
+      const members = await this.prisma.user.findMany({
+        where: {
+          orgId: orgId,
+          allowPersonalEmailSync: true,
+        },
+        select: { user_id: true, email: true },
+      });
+  
+      const mailboxes = [
+        { email: sharedMailbox, assignedToId: null, label: 'Shared Mailbox' },
+        ...members.map((member) => ({
+          email: member.email,
+          assignedToId: member.user_id,
+          label: `${member.email}’s Inbox`,
+        })),
+      ];
+  
       const foldersToSync = [
         { name: 'Inbox', id: 'inbox' },
         { name: 'Junk', id: 'junkemail' },
       ];
-
+  
       let allEmails: GraphEmailResponse['value'] = [];
-
-      for (const folder of foldersToSync) {
-        const syncState = await this.prisma.syncState.findUnique({
-          where: {
-            orgId_folderId_unique: { orgId: orgId, folderId: folder.id },
-          },
-        });
-
-        let url =
-          syncState?.deltaLink ||
-          `https://graph.microsoft.com/v1.0/users/${sharedMailbox}/mailFolders/${folder.id}/messages/delta`;
-        const params = syncState?.deltaLink
-          ? {}
-          : {
-              $top: 50,
-              $select: 'id,subject,from,receivedDateTime,body,bodyPreview',
-              $filter: `receivedDateTime ge ${new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()}`,
-            };
-
-        const response = await axios.get<GraphEmailResponse>(url, {
-          headers: { Authorization: `Bearer ${token}` },
-          params,
-        });
-
-        this.logger.log(
-          `Graph API response (${folder.name}):`,
-          JSON.stringify(response.data),
-        );
-        if (response.data.value.length > 0) {
-          this.logger.log(
-            `First email sample (${folder.name}):`,
-            JSON.stringify(response.data.value[0]),
-          );
-        }
-
-        allEmails = allEmails.concat(response.data.value);
-        this.logger.log(`allEmails`, allEmails);
-
-        this.logger.log(
-          `Fetched ${response.data.value.length} emails from ${folder.name}`,
-        );
-
-        if (response.data['@odata.deltaLink']) {
-          await this.prisma.syncState.upsert({
+  
+      for (const mailbox of mailboxes) {
+        this.logger.log(`Fetching leads from ${mailbox.label}—let’s snag those gems!`);
+  
+        for (const folder of foldersToSync) {
+          const syncState = await this.prisma.syncState.findUnique({
             where: {
-              orgId_folderId_unique: { orgId: orgId, folderId: folder.id },
-            },
-            update: {
-              deltaLink: response.data['@odata.deltaLink'],
-              lastSyncedAt: new Date(),
-            },
-            create: {
-              orgId: orgId,
-              platform: platformName,
-              folderId: folder.id,
-              deltaLink: response.data['@odata.deltaLink'],
+              orgId_folderId_unique: { orgId: `${orgId}_${mailbox.email}`, folderId: folder.id },
             },
           });
-          this.logger.log(
-            `Updated sync state for ${folder.name} with deltaLink`,
-          );
+  
+          let url =
+            syncState?.deltaLink ||
+            `https://graph.microsoft.com/v1.0/users/${mailbox.email}/mailFolders/${folder.id}/messages/delta`;
+          const params = syncState?.deltaLink
+            ? {}
+            : {
+                $top: 50,
+                $select: 'id,subject,from,receivedDateTime,body,bodyPreview',
+                $filter: `receivedDateTime ge ${new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()}`,
+              };
+  
+          try {
+            const response = await axios.get<GraphEmailResponse>(url, {
+              headers: { Authorization: `Bearer ${token}` },
+              params,
+            });
+  
+            this.logger.log(
+              `Graph API response (${mailbox.label} - ${folder.name}):`,
+              JSON.stringify(response.data),
+            );
+            if (response.data.value.length > 0) {
+              this.logger.log(
+                `First email sample (${mailbox.label} - ${folder.name}):`,
+                JSON.stringify(response.data.value[0]),
+              );
+            }
+  
+            allEmails = allEmails.concat(response.data.value);
+            this.logger.log(
+              `Fetched ${response.data.value.length} emails from ${mailbox.label} - ${folder.name}`,
+            );
+  
+            if (response.data['@odata.deltaLink']) {
+              await this.prisma.syncState.upsert({
+                where: {
+                  orgId_folderId_unique: { orgId: `${orgId}_${mailbox.email}`, folderId: folder.id },
+                },
+                update: {
+                  deltaLink: response.data['@odata.deltaLink'],
+                  lastSyncedAt: new Date(),
+                },
+                create: {
+                  orgId: `${orgId}_${mailbox.email}`,
+                  platform: platformName,
+                  folderId: folder.id,
+                  deltaLink: response.data['@odata.deltaLink'],
+                },
+              });
+              this.logger.log(
+                `Updated sync state for ${mailbox.label} - ${folder.name}—sync’s looking fab!`,
+              );
+            }
+          } catch (folderError) {
+            this.logger.error(
+              `Oops, ${mailbox.label} - ${folder.name} flopped:`,
+              folderError.message,
+            );
+            continue; 
+          }
         }
       }
-
-      this.logger.log(`Total fetched emails: ${allEmails.length}`);
-      const potentialLeads = allEmails.filter((email) =>
-        this.isPotentialLead(email),
-      );
+  
+      this.logger.log(`Total fetched emails: ${allEmails.length}—time to shine!`);
+      const potentialLeads = allEmails.filter((email) => this.isPotentialLead(email));
+  
       for (const email of potentialLeads) {
+        const senderEmail = email.from.emailAddress.address;
+        const mailbox = mailboxes.find((m) => m.email === senderEmail) || mailboxes[0];
         const leadData = {
           orgId,
           source_platform: platformName,
+          assignedToId: mailbox.assignedToId, 
           name: email.from.emailAddress.name || 'Unknown',
-          email: email.from.emailAddress.address,
+          email: senderEmail,
           phone: null,
           company: null,
           job_title: null,
           status: 'NEW' as const,
           created_at: new Date(email.receivedDateTime),
         };
-
+  
         const emailData = {
           subject: email.subject || 'No Subject',
           body: email.body?.content || email.bodyPreview || '',
@@ -193,9 +223,9 @@ export class LeadService {
           receivedDateTime: new Date(email.receivedDateTime),
           emailId: email.id,
           senderName: email.from.emailAddress.name || null,
-          senderEmail: email.from.emailAddress.address,
+          senderEmail: senderEmail,
         };
-
+  
         const existingLead = await this.prisma.lead.findUnique({
           where: {
             org_id_email_source_platform_unique: {
@@ -205,7 +235,7 @@ export class LeadService {
             },
           },
         });
-
+  
         if (existingLead) {
           await this.prisma.lead.update({
             where: { lead_id: existingLead.lead_id },
@@ -219,6 +249,7 @@ export class LeadService {
               leadId: existingLead.lead_id,
             },
           });
+          this.logger.log(`Updated lead for ${leadData.email}—refreshed and fabulous!`);
         } else {
           const newLead = await this.prisma.lead.create({ data: leadData });
           await this.prisma.leadEmail.create({
@@ -227,18 +258,21 @@ export class LeadService {
               leadId: newLead.lead_id,
             },
           });
+          this.logger.log(
+            `New lead from ${mailbox.label} assigned to ${mailbox.assignedToId || 'Shared'}—slay!`,
+          );
         }
       }
-
-      this.logger.log(`Stored ${potentialLeads.length} leads`);
-
+  
+      this.logger.log(`Stored ${potentialLeads.length} leads—marketing magic done!`);
+  
       return {
         needsAuth: false,
         message: 'Sync Successful',
       };
     } catch (error) {
       this.logger.error(
-        'Error fetching/storing leads:',
+        'Sync crashed the party:',
         error.message,
         error.response?.data,
       );

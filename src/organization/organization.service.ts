@@ -51,4 +51,27 @@ export class OrganizationService {
     console.log(`Inviting ${email} to org ${orgId} by ${inviterRole}`);
     return { message: `Invite sent to ${email}` };
   }
+
+  async getOrganizationMembers(orgId: string) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+    });
+    if (!org) throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
+
+    const members = await this.prisma.user.findMany({
+      where: {
+        orgId: orgId,
+      },
+      select: {
+        firstName: true,
+        lastName: true,
+        email: true,
+        profileImage: true,
+        role: true,
+        allowPersonalEmailSync: true,
+      },
+    });
+
+    return members;
+  }
 }

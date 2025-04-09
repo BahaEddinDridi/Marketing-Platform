@@ -11,6 +11,15 @@ interface AuthenticatedRequest extends Request {
 export class OrganizationController {
   constructor(private readonly organizationService: OrganizationService) {}
 
+  @Get(':orgId/members')
+  @UseGuards(JwtAuthGuard)
+  async getOrganizationMembers(@Param('orgId') orgId: string, @Req() req: AuthenticatedRequest) {
+    const user = req.user as { orgId: string };
+    if (user.orgId !== orgId) throw new HttpException('Forbidden', HttpStatus.FORBIDDEN);
+    return this.organizationService.getOrganizationMembers(orgId);
+  }
+
+
   @Get(':orgId')
   @UseGuards(JwtAuthGuard)
   async getOrg(@Param('orgId') orgId: string, @Req() req: AuthenticatedRequest) {

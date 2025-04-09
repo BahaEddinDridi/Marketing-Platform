@@ -30,6 +30,7 @@ export class UsersService {
         zipCode: true,
         country: true,
         profileImage: true,
+        allowPersonalEmailSync: true,
       },
     });
     if (!user) throw new NotFoundException('User not found');
@@ -180,4 +181,48 @@ export class UsersService {
     const completionPercentage = (filledFields / totalFields) * 100;
     return Math.round(completionPercentage);
   }
+
+  async updateAllowPersonalEmailSync(
+    userId: string,
+    requesterId: string,
+    allowSync: boolean,
+  ) {
+    const requester = await this.prisma.user.findUnique({
+      where: { user_id: requesterId },
+      select: { role: true },
+    });
+  
+    if (!requester) {
+      throw new UnauthorizedException('Requester not found');
+    }
+  
+    const isSelf = userId === requesterId;
+    const isAdmin = requester.role === 'ADMIN';
+  
+    if (!isSelf && !isAdmin) {
+      throw new UnauthorizedException('Not authorized to update this setting');
+    }
+  
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+    });
+  
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+  
+    const updatedUser = await this.prisma.user.update({
+      where: { user_id: userId },
+      data: {
+        allowPersonalEmailSync: allowSync,
+        updated_at: new Date(),
+      },
+    });
+  
+    return {
+      user_id: updatedUser.user_id,
+      allowPersonalEmailSync: updatedUser.allowPersonalEmailSync,
+    };
+  }
+  
 }

@@ -9,7 +9,7 @@ import {
   Res,
   UseGuards,
   UseInterceptors,
-  UploadedFile
+  UploadedFile,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
@@ -28,6 +28,21 @@ export class UsersController {
   @UseGuards(JwtAuthGuard)
   async getUserProfile(@Param('id') id: string) {
     return this.userService.getUserProfile(id);
+  }
+
+  @Patch(':id/allow-personal-email-sync')
+  @UseGuards(JwtAuthGuard)
+  async updateAllowPersonalEmailSync(
+    @Param('id') id: string,
+    @Req() request: any,
+    @Body('allowSync') allowSync: boolean,
+  ) {
+    const requesterId = request.user?.user_id;
+    return this.userService.updateAllowPersonalEmailSync(
+      id,
+      requesterId,
+      allowSync,
+    );
   }
 
   @Patch(':id')
@@ -60,9 +75,8 @@ export class UsersController {
   @Get('profile-completion/:userId')
   @UseGuards(JwtAuthGuard)
   async getProfileCompletion(@Param('userId') userId: string, @Req() req) {
-    const percentage = await this.userService.getProfileCompletionPercentage(userId);
+    const percentage =
+      await this.userService.getProfileCompletionPercentage(userId);
     return { completionPercentage: percentage };
   }
-
-
 }
