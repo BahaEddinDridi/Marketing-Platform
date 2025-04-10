@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { AuthService } from 'src/auth/auth.service';
 import axios from 'axios';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import * as schedule from 'node-schedule';
 
 interface GraphEmailResponse {
   value: {
@@ -21,11 +22,19 @@ interface GraphEmailResponse {
 @Injectable()
 export class LeadService {
   private readonly logger = new Logger(LeadService.name);
-
+  private readonly cronMap = {
+    EVERY_10_SECONDS: '*/10 * * * * *', // Every 10 seconds (for testing)
+    EVERY_30_MINUTES: '*/30 * * * *',   // Every 30 minutes
+    EVERY_HOUR: '0 * * * *',            // Every hour
+    EVERY_DAY: '0 0 * * *',             // Every day at midnight
+  };
+  private jobs = new Map<string, schedule.Job>();
   constructor(
     private prisma: PrismaService,
     private readonly authService: AuthService,
-  ) {}
+  ) {
+    this.startDynamicSync();
+  }
 
   async findAll() {
     return this.prisma.lead.findMany();
@@ -39,15 +48,38 @@ export class LeadService {
     return this.prisma.lead.delete({ where: { lead_id } });
   }
 
-  private isPotentialLead(email: GraphEmailResponse['value'][0]): boolean {
+  private async isPotentialLead(
+    email: GraphEmailResponse['value'][0],
+    orgId: string,
+  ): Promise<boolean> {
+    const leadConfig = await this.prisma.leadConfiguration.findUnique({
+      where: { orgId },
+      select: { filters: true },
+    });
+
+    if (!leadConfig) {
+      this.logger.warn(`No lead config for org ${orgId}, using defaults`);
+      return this.defaultIsPotentialLead(email); 
+    }
+
     const subject = email.subject.toLowerCase();
     const preview = email.body?.content.toLowerCase();
-
-    const leadKeywords = ['inquiry', 'interested', 'quote', 'sales', 'meeting'];
+    const leadKeywords = leadConfig.filters;
 
     return (
       leadKeywords.some((kw) => subject.includes(kw)) ||
       leadKeywords.some((kw) => preview?.includes(kw))
+    );
+  }
+
+  private defaultIsPotentialLead(email: GraphEmailResponse['value'][0]): boolean {
+    const subject = email.subject.toLowerCase();
+    const preview = email.body?.content.toLowerCase();
+    const defaultKeywords = ['inquiry', 'interested', 'quote', 'sales', 'meeting'];
+
+    return (
+      defaultKeywords.some((kw) => subject.includes(kw)) ||
+      defaultKeywords.some((kw) => preview?.includes(kw))
     );
   }
 
@@ -117,10 +149,15 @@ export class LeadService {
         })),
       ];
   
-      const foldersToSync = [
-        { name: 'Inbox', id: 'inbox' },
-        { name: 'Junk', id: 'junkemail' },
-      ];
+      const leadConfig = await this.prisma.leadConfiguration.findUnique({
+        where: { orgId },
+      });
+      const foldersToSync = leadConfig?.folders
+        ? Object.entries(leadConfig.folders).map(([id, name]) => ({ id, name }))
+        : [
+            { name: 'Inbox', id: 'inbox' },
+            { name: 'Junk', id: 'junkemail' },
+          ];
   
       let allEmails: GraphEmailResponse['value'] = [];
   
@@ -197,9 +234,14 @@ export class LeadService {
         }
       }
   
-      this.logger.log(`Total fetched emails: ${allEmails.length}—time to shine!`);
-      const potentialLeads = allEmails.filter((email) => this.isPotentialLead(email));
-  
+      this.logger.log(`Total fetched emails: ${allEmails.length}`);
+      const potentialLeads = (
+        await Promise.all(allEmails.map((email) => this.isPotentialLead(email, orgId)))
+      )
+        .map((isLead, index) => (isLead ? allEmails[index] : null))
+        .filter((email): email is GraphEmailResponse['value'][0] => email !== null);
+        
+        
       for (const email of potentialLeads) {
         const senderEmail = email.from.emailAddress.address;
         const mailbox = mailboxes.find((m) => m.email === senderEmail) || mailboxes[0];
@@ -249,7 +291,7 @@ export class LeadService {
               leadId: existingLead.lead_id,
             },
           });
-          this.logger.log(`Updated lead for ${leadData.email}—refreshed and fabulous!`);
+          this.logger.log(`Updated lead for ${leadData.email}`);
         } else {
           const newLead = await this.prisma.lead.create({ data: leadData });
           await this.prisma.leadEmail.create({
@@ -259,12 +301,12 @@ export class LeadService {
             },
           });
           this.logger.log(
-            `New lead from ${mailbox.label} assigned to ${mailbox.assignedToId || 'Shared'}—slay!`,
+            `New lead from ${mailbox.label} assigned to ${mailbox.assignedToId || 'Shared'}`,
           );
         }
       }
   
-      this.logger.log(`Stored ${potentialLeads.length} leads—marketing magic done!`);
+      this.logger.log(`Stored ${potentialLeads.length} potential leads`);
   
       return {
         needsAuth: false,
@@ -283,34 +325,103 @@ export class LeadService {
     }
   }
 
-  @Cron(CronExpression.EVERY_HOUR)
-  async syncLeadsForAllOrganizations() {
-    this.logger.log('Starting hourly lead sync for all organizations');
+  async updateLeadConfig(
+    orgId: string,
+    data: {
+      filters?: string[];
+      folders?: Record<string, string>;
+      syncInterval?: string;
+    },
+  ) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      include: { leadConfig: true },
+    });
+    if (!org) throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
+
+    let updatedLeadConfig;
+
+    if (!org.leadConfig) {
+      // Create new config if none exists
+      updatedLeadConfig = await this.prisma.leadConfiguration.create({
+        data: {
+          orgId,
+          filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
+          folders: data.folders || { inbox: 'Inbox', junkemail: 'Junk' },
+          syncInterval: data.syncInterval || 'EVERY_HOUR',
+        },
+      });
+      // Schedule the sync for the new config
+      await this.scheduleOrgSync(orgId, updatedLeadConfig.syncInterval);
+    } else {
+      // Update existing config and reschedule only if syncInterval changes
+      const previousSyncInterval = org.leadConfig.syncInterval;
+      updatedLeadConfig = await this.prisma.leadConfiguration.update({
+        where: { orgId },
+        data: {
+          filters: data.filters !== undefined ? data.filters : undefined,
+          folders: data.folders !== undefined ? data.folders : undefined,
+          syncInterval: data.syncInterval !== undefined ? data.syncInterval : undefined,
+        },
+      });
+
+      // Restart the sync if syncInterval was provided and changed
+      if (data.syncInterval && data.syncInterval !== previousSyncInterval) {
+        await this.scheduleOrgSync(orgId, updatedLeadConfig.syncInterval);
+      }
+    }
+
+    return updatedLeadConfig;
+  }
+  
+  private async startDynamicSync() {
+    this.logger.log('Starting dynamic sync for organizations');
 
     try {
       const organizations = await this.prisma.organization.findMany({
-        select: { id: true },
+        select: {
+          id: true,
+          leadConfig: {
+            select: { syncInterval: true },
+          },
+        },
       });
       this.logger.log(`Found ${organizations.length} organizations to sync`);
-
       for (const org of organizations) {
-        this.logger.log(`Syncing leads for orgId: ${org.id}`);
-        const result = await this.fetchAndStoreLeads(org.id);
-        if (result.needsAuth) {
-          this.logger.warn(`Org ${org.id} needs re-authentication`);
-        } else {
-          this.logger.log(
-            `Sync completed for orgId: ${org.id} - ${result.message}`,
-          );
-        }
+        await this.scheduleOrgSync(org.id, org.leadConfig?.syncInterval);
       }
     } catch (error) {
       this.logger.error(
-        'Error in hourly lead sync:',
+        'Error starting dynamic sync:',
         error.message,
         error.stack,
       );
     }
+  }
+
+  async scheduleOrgSync(orgId: string, syncInterval?: string) {
+    const existingJob = this.jobs.get(orgId);
+    if (existingJob) {
+      existingJob.cancel();
+      this.logger.log(`Cancelled old sync job for org ${orgId}`);
+    }
+
+    const interval = syncInterval || 'EVERY_HOUR';
+    const cronExpression = this.cronMap[interval] || this.cronMap.EVERY_HOUR;
+
+    this.logger.log(`Scheduling org ${orgId} with ${interval} (${cronExpression})`);
+
+    const job = schedule.scheduleJob(cronExpression, async () => {
+      this.logger.log(`Syncing leads for org ${orgId}`);
+      const result = await this.fetchAndStoreLeads(orgId);
+      if (result.needsAuth) {
+        this.logger.warn(`Org ${orgId} needs to re-authenticate`);
+      } else {
+        this.logger.log(`Org ${orgId}`);
+      }
+    });
+
+    this.jobs.set(orgId, job);
   }
 
   async fetchLeadsByUserId(orgId: string) {

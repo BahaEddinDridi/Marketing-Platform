@@ -22,7 +22,7 @@ export class OrganizationService {
   }
 
   async getOrganization(orgId: string) {
-    return this.prisma.organization.findUnique({ where: { id: orgId } });
+    return this.prisma.organization.findUnique({ where: { id: orgId }, include: { leadConfig: true } });
   }
 
   async updateOrganization(orgId: string, data: { name: string; sharedMailbox: string }) {
@@ -74,4 +74,6 @@ export class OrganizationService {
 
     return members;
   }
+  
+
 }

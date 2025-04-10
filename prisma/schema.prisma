@@ -32,8 +32,20 @@ model Organization {
   users         User[]
   leads         Lead[]
   platforms     MarketingPlatform[]
+  leadConfig       LeadConfiguration? @relation("OrgToLeadConfig")
   created_at    DateTime            @default(now())
   updated_at    DateTime            @updatedAt
+}
+
+model LeadConfiguration {
+  id            String       @id @default(uuid())
+  orgId         String       @unique 
+  organization  Organization @relation("OrgToLeadConfig", fields: [orgId], references: [id])
+  filters       String[]     @default(["inquiry", "interested", "quote", "sales", "meeting"]) 
+  folders       Json         @default("{\"inbox\": \"Inbox\", \"junkemail\": \"Junk\"}") 
+  syncInterval  String       @default("EVERY_HOUR")
+  created_at    DateTime     @default(now())
+  updated_at    DateTime     @updatedAt
 }
 
 model User {

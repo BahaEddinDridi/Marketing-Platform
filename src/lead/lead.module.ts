@@ -13,5 +13,6 @@ import { ConfigModule } from '@nestjs/config';
   ],
   controllers: [LeadController],
   providers: [LeadService],
+  exports: [LeadService],
 })
 export class LeadModule {}
