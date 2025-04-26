@@ -25,37 +25,50 @@ enum Status {
 }
 
 model Organization {
-  id            String              @id @default(uuid())
+  id            String                @id @default("single-org")
   name          String
   tenantId      String?
   sharedMailbox String?
   users         User[]
   leads         Lead[]
   platforms     MarketingPlatform[]
-  leadConfig       LeadConfiguration? @relation("OrgToLeadConfig")
-  created_at    DateTime            @default(now())
-  updated_at    DateTime            @updatedAt
+  preferences   MicrosoftPreferences?
+  leadConfig    LeadConfiguration?    @relation("OrgToLeadConfig")
+  created_at    DateTime              @default(now())
+  updated_at    DateTime              @updatedAt
+
+  @@unique([id])
+}
+
+model MicrosoftPreferences {
+  id              String       @id @default(uuid())
+  orgId           String       @unique @default("single-org")
+  organization    Organization @relation(fields: [orgId], references: [id])
+  signInMethod    Boolean      @default(true)
+  leadSyncEnabled Boolean      @default(false)
+  created_at      DateTime     @default(now())
+  updated_at      DateTime     @updatedAt
 }
 
 model LeadConfiguration {
-  id            String       @id @default(uuid())
-  orgId         String       @unique 
-  organization  Organization @relation("OrgToLeadConfig", fields: [orgId], references: [id])
-  filters       String[]     @default(["inquiry", "interested", "quote", "sales", "meeting"]) 
-  folders       Json         @default("{\"inbox\": \"Inbox\", \"junkemail\": \"Junk\"}") 
-  syncInterval  String       @default("EVERY_HOUR")
-  created_at    DateTime     @default(now())
-  updated_at    DateTime     @updatedAt
+  id           String       @id @default(uuid())
+  orgId        String       @unique @default("single-org")
+  organization Organization @relation("OrgToLeadConfig", fields: [orgId], references: [id])
+  filters      String[]     @default(["inquiry", "interested", "quote", "sales", "meeting"])
+  folders      Json         @default("{\"inbox\": \"Inbox\", \"junkemail\": \"Junk\"}")
+  syncInterval String       @default("EVERY_HOUR")
+  created_at   DateTime     @default(now())
+  updated_at   DateTime     @updatedAt
 }
 
 model User {
-  user_id                String               @id @default(uuid())
+  user_id                String                @id @default(uuid())
   firstName              String?
   lastName               String?
-  email                  String               @unique
-  password               String
-  orgId                  String
-  organization           Organization         @relation(fields: [orgId], references: [id])
+  email                  String                @unique
+  password               String?
+  orgId                  String                @default("single-org")
+  organization           Organization          @relation(fields: [orgId], references: [id])
   phoneNumber            String?
   street                 String?
   city                   String?
@@ -67,16 +80,17 @@ model User {
   profileImage           String?
   lastLogin              DateTime?
   profilePicture         String?
-  role                   Role                 @default(USER)
-  status                 Status               @default(ACTIVE)
+  role                   Role                  @default(USER)
+  status                 Status                @default(ACTIVE)
   refreshToken           String?
-  googleId               String?              @unique
-  microsoftId            String?              @unique
-  allowPersonalEmailSync Boolean              @default(false)
-  assignedLeads          Lead[]               @relation("AssignedTo")
+  googleId               String?               @unique
+  microsoftId            String?               @unique
+  allowPersonalEmailSync Boolean               @default(false)
+  assignedLeads          Lead[]                @relation("AssignedTo")
   password_tokens        PasswordResetToken[]
-  created_at             DateTime             @default(now())
-  updated_at             DateTime             @updatedAt
+  credentials            PlatformCredentials[]
+  created_at             DateTime              @default(now())
+  updated_at             DateTime              @updatedAt
 }
 
 model PasswordResetToken {
@@ -92,16 +106,17 @@ enum SyncStatus {
   CONNECTED
   SYNCING
   FAILED
+  DISCONNECTED
 }
 
 model MarketingPlatform {
   platform_id    String                @id @default(uuid())
   platform_name  String
-  orgId          String
+  orgId          String                @default("single-org")
   organization   Organization          @relation(fields: [orgId], references: [id])
   last_sync_time DateTime?
   sync_status    SyncStatus            @default(CONNECTED)
-  campaigns      Campaign[]
+  campaigns      MarketingCampaign[]
   credentials    PlatformCredentials[]
   created_at     DateTime              @default(now())
   updated_at     DateTime              @updatedAt
@@ -113,12 +128,17 @@ model PlatformCredentials {
   credential_id String            @id @default(uuid())
   platform      MarketingPlatform @relation(fields: [platform_id], references: [platform_id])
   platform_id   String
+  user_id       String?
+  user          User?             @relation(fields: [user_id], references: [user_id])
+  type          String            @default("AUTH")
   access_token  String?
   refresh_token String?
   scopes        String[]
   expires_at    DateTime?
   created_at    DateTime          @default(now())
   updated_at    DateTime          @updatedAt
+
+  @@unique([platform_id, user_id, type])
 }
 
 enum LeadStatus {
@@ -131,17 +151,19 @@ enum LeadStatus {
 
 model Lead {
   lead_id         String       @id @default(uuid())
-  orgId           String
+  orgId           String       @default("single-org")
   organization    Organization @relation(fields: [orgId], references: [id])
   assignedToId    String?
   assignedTo      User?        @relation("AssignedTo", fields: [assignedToId], references: [user_id])
   source_platform String
+  campaignId      String?
+  campaign        Campaign?    @relation(fields: [campaignId], references: [id])
   name            String
   email           String
   phone           String?
   company         String?
   job_title       String?
-  leadEmail       LeadEmail?   @relation("LeadToEmail")
+  leadEmails      LeadEmail[]   @relation("LeadToEmail")
   status          LeadStatus
   created_at      DateTime     @default(now())
   updated_at      DateTime     @updatedAt
@@ -151,17 +173,27 @@ model Lead {
   @@index([source_platform])
 }
 
+model LeadAttachment {
+  id            String    @id @default(uuid())
+  leadEmailId   String
+  fileName      String
+  cloudinaryUrl String
+  createdAt     DateTime  @default(now())
+  leadEmail     LeadEmail @relation(fields: [leadEmailId], references: [id], onDelete: Cascade)
+}
+
 model LeadEmail {
-  id               String   @id @default(uuid())
-  leadId           String   @unique
-  lead             Lead     @relation("LeadToEmail", fields: [leadId], references: [lead_id])
+  id               String           @id @default(uuid())
+  leadId           String           
+  lead             Lead             @relation("LeadToEmail", fields: [leadId], references: [lead_id], onDelete: Cascade)
   subject          String
-  body             String   @db.Text
+  body             String           @db.Text
   hasAttachments   Boolean
   receivedDateTime DateTime
-  emailId          String
+  emailId          String           @unique
   senderName       String?
   senderEmail      String
+  attachments      LeadAttachment[]
 
   @@index([leadId])
 }
@@ -171,10 +203,11 @@ model SyncState {
   orgId        String
   platform     String
   folderId     String
+  mailboxEmail String
   deltaLink    String
   lastSyncedAt DateTime @default(now()) @updatedAt
 
-  @@unique([orgId, folderId], name: "orgId_folderId_unique")
+  @@unique([orgId, mailboxEmail, folderId], name: "orgId_mailboxEmail_folderId_unique")
   @@index([orgId])
 }
 
@@ -184,7 +217,7 @@ enum CampaignStatus {
   COMPLETED
 }
 
-model Campaign {
+model MarketingCampaign {
   campaign_id   String                @id @default(uuid())
   campaign_name String
   platform      MarketingPlatform?    @relation(fields: [platform_id], references: [platform_id])
@@ -198,18 +231,27 @@ model Campaign {
   updated_at    DateTime              @updatedAt
 }
 
-//marketing_campaign
+model Campaign {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  platform    String
+  leads       Lead[]
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
 
-//new model campaign (type) relation with leads
+  @@unique([name, platform])
+}
+
 model CampaignPerformance {
-  performance_id String   @id @default(uuid())
-  campaign       Campaign @relation(fields: [campaign_id], references: [campaign_id])
+  performance_id String            @id @default(uuid())
+  campaign       MarketingCampaign @relation(fields: [campaign_id], references: [campaign_id])
   campaign_id    String
-  clicks         Int      @default(0)
-  impressions    Int      @default(0)
-  conversions    Int      @default(0)
+  clicks         Int               @default(0)
+  impressions    Int               @default(0)
+  conversions    Int               @default(0)
   cost           Float
   roi            Float
   date           DateTime
-  created_at     DateTime @default(now())
+  created_at     DateTime          @default(now())
 }

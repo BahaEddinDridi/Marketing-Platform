@@ -122,10 +122,9 @@ export class UsersService {
       }
     });
   
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
+    if (!user || !user.password)
+      throw new UnauthorizedException('Invalid credentials');
+    
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       throw new UnauthorizedException('Incorrect password');

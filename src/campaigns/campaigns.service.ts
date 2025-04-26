@@ -8,27 +8,27 @@ export class CampaignsService {
   constructor(private prisma: PrismaService) {}
 
   async create(createCampaignDto: CreateCampaignDto) {
-    return this.prisma.campaign.create({ data: createCampaignDto });
+    return this.prisma.marketingCampaign.create({ data: createCampaignDto });
   }
 
   async findAll() {
-    return this.prisma.campaign.findMany();
+    return this.prisma.marketingCampaign.findMany();
   }
 
   async findOne(id: string) {
-    return this.prisma.campaign.findUnique({
+    return this.prisma.marketingCampaign.findUnique({
       where: { campaign_id: id },
       include: { performances: true },
     });
   }
   async update(id: string, updateCampaignDto: UpdateCampaignDto) {
-    return this.prisma.campaign.update({
+    return this.prisma.marketingCampaign.update({
       where: { campaign_id: id },
       data: updateCampaignDto,
     });
   }
 
   async remove(id: string) {
-    return this.prisma.campaign.delete({ where: { campaign_id: id } });
+    return this.prisma.marketingCampaign.delete({ where: { campaign_id: id } });
   }
 }

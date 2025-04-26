@@ -15,10 +15,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { LeadService } from './lead.service';
-import { CreateLeadDto } from './dto/create-lead.dto';
-import { UpdateLeadDto } from './dto/update-lead.dto';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
-import { AuthGuard } from '@nestjs/passport';
 
 interface AuthenticatedRequest extends Request {
   user?: { user_id: string; email: string; orgId: string; role: string };
@@ -33,34 +30,24 @@ export class LeadController {
     return this.leadService.findAll();
   }
 
+
   @Get('fetch')
   @UseGuards(JwtAuthGuard)
   async fetchEmails(@Req() req: AuthenticatedRequest) {
     const user = req.user as { user_id: string; email: string; orgId: string };
-    const org_id = user.orgId;
-    try {
-      const result = await this.leadService.fetchAndStoreLeads(org_id);
-      return result || { error: 'No data returned from service' };
-    } catch (error) {
-      console.error('LeadController: Error:', error.message);
-      throw error;
-    }
+    return this.leadService.fetchAndStoreLeads(user.orgId);
   }
 
   @Get('getByUserId')
   @UseGuards(JwtAuthGuard)
   async getByUserId(@Req() req: AuthenticatedRequest) {
     const user = req.user as { user_id: string; email: string; orgId: string };
-    const org_id = user.orgId;
-    return this.leadService.fetchLeadsByUserId(org_id);
+    return this.leadService.fetchLeadsByUserId(user.orgId, user.user_id);
   }
 
   @Post('update-status')
   @UseGuards(JwtAuthGuard)
-  async updateLeadStatus(
-    @Req() req,
-    @Body() body: { leadId: string; status: string },
-  ) {
+  async updateLeadStatus(@Body() body: { leadId: string; status: string }) {
     const { leadId, status } = body;
     return this.leadService.updateLeadStatus(leadId, status);
   }
@@ -98,6 +85,45 @@ export class LeadController {
     return this.leadService.updateLeadConfig(orgId, data);
   }
 
+  @Post('setup')
+  @UseGuards(JwtAuthGuard)
+  async setupLeadSync(
+    @Req() req: AuthenticatedRequest,
+    @Body() data: { sharedMailbox: string; filters?: string[]; folders?: Record<string, string>; syncInterval?: string },
+  ) {
+    const user = req.user as { user_id: string; orgId: string };
+    return this.leadService.setupLeadSync(user.orgId, user.user_id, data);
+  }
+
+  @Post('connect')
+  @UseGuards(JwtAuthGuard)
+  async connectLeadSync(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; orgId: string };
+    return this.leadService.connectLeadSync(user.user_id);
+  }
+
+  @Post('disconnect')
+  @UseGuards(JwtAuthGuard)
+  async disconnectLeadSync(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; orgId: string };
+    return this.leadService.disconnectLeadSync(user.user_id);
+  }
+
+  @Post('connect-member')
+  @UseGuards(JwtAuthGuard)
+  async connectMemberLeadSync(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; orgId: string };
+    return this.leadService.connectMemberLeadSync(user.user_id);
+  }
+
+  @Post('disconnect-member')
+  @UseGuards(JwtAuthGuard)
+  async disconnectMemberLeadSync(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; orgId: string };
+    return this.leadService.disconnectMemberLeadSync(user.user_id);
+  }
+  
+  
   @Get(':id')
   @UseGuards(JwtAuthGuard)
   findOne(@Param('id') id: string) {

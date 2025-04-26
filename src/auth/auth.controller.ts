@@ -8,6 +8,7 @@ import {
   HttpStatus,
   Get,
   Res,
+  Redirect,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
@@ -160,7 +161,7 @@ export class AuthController {
   @Get('microsoft/callback')
   @UseGuards(AuthGuard('microsoft'))
   async microsoftLoginCallback(@Req() req, @Res() res: Response) {
-    const { user, tokens, isNewOrg } = req.user;
+    const { user, tokens } = req.user;
     res.cookie('accessToken', tokens.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -175,10 +176,7 @@ export class AuthController {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    const redirectUrl = isNewOrg
-      ? `http://localhost:3000/signin?callback=microsoft&orgId=${user.orgId}`
-      : 'http://localhost:3000/signin?callback=microsoft';
-    res.redirect(redirectUrl);
+    res.redirect('http://localhost:3000/signin?callback=microsoft');
   }
 
   @Get('microsoft/leads')
@@ -189,5 +187,34 @@ export class AuthController {
   @UseGuards(AuthGuard('microsoft-leads'))
   async microsoftLeadsCallback(@Req() req, @Res() res: Response) {
     res.redirect('http://localhost:3000/leads?auth=success');
+  }
+
+  @Post('microsoft/connect')
+  @UseGuards(JwtAuthGuard)
+  @Redirect()
+  async connectMicrosoft(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string; orgId: string; role: string };
+    return this.authService.connectMicrosoft(user.user_id);
+  }
+
+  @Post('microsoft/disconnect')
+  @UseGuards(JwtAuthGuard)
+  async disconnectMicrosoft(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    const userRecord = await this.prisma.user.findUnique({ where: { user_id: user.user_id } });
+    if (!userRecord || userRecord.role !== 'ADMIN') {
+      throw new HttpException('Only admins can disconnect Microsoft', HttpStatus.FORBIDDEN);
+    }
+
+    return this.authService.disconnectMicrosoft(user.user_id);
+  }
+
+  @Get('microsoft-preferences')
+  async getPreferences() {
+    const preferences = await this.prisma.microsoftPreferences.findUnique({
+      where: { orgId: 'single-org' },
+    });
+    console.log('Preferences:', preferences);
+    return { signInMethod: preferences?.signInMethod ?? true, leadSyncEnabled: preferences?.leadSyncEnabled ?? false, };
   }
 }

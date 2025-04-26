@@ -22,12 +22,21 @@ export class OrganizationService {
   }
 
   async getOrganization(orgId: string) {
-    return this.prisma.organization.findUnique({ where: { id: orgId }, include: { leadConfig: true } });
+    return this.prisma.organization.findUnique({
+      where: { id: orgId },
+      include: { leadConfig: true },
+    });
   }
 
-  async updateOrganization(orgId: string, data: { name: string; sharedMailbox: string }) {
-    const org = await this.prisma.organization.findUnique({ where: { id: orgId } });
-    if (!org) throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
+  async updateOrganization(
+    orgId: string,
+    data: { name: string; sharedMailbox: string },
+  ) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+    });
+    if (!org)
+      throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
 
     return this.prisma.organization.update({
       where: { id: orgId },
@@ -36,15 +45,23 @@ export class OrganizationService {
   }
 
   async inviteUser(orgId: string, email: string, inviterRole: string) {
-    const org = await this.prisma.organization.findUnique({ where: { id: orgId } });
-    if (!org) throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+    });
+    if (!org)
+      throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
 
     const orgDomain = org.name.split(' ')[1].toLowerCase();
     if (!email.endsWith(`@${orgDomain}`)) {
-      throw new HttpException('Email domain must match organization', HttpStatus.BAD_REQUEST);
+      throw new HttpException(
+        'Email domain must match organization',
+        HttpStatus.BAD_REQUEST,
+      );
     }
 
-    const existingUser = await this.prisma.user.findUnique({ where: { email } });
+    const existingUser = await this.prisma.user.findUnique({
+      where: { email },
+    });
     if (existingUser) {
       throw new HttpException('User already exists', HttpStatus.CONFLICT);
     }
@@ -56,24 +73,35 @@ export class OrganizationService {
     const org = await this.prisma.organization.findUnique({
       where: { id: orgId },
     });
-    if (!org) throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
+    if (!org)
+      throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
 
     const members = await this.prisma.user.findMany({
       where: {
         orgId: orgId,
       },
       select: {
+        user_id: true,
         firstName: true,
         lastName: true,
         email: true,
         profileImage: true,
         role: true,
         allowPersonalEmailSync: true,
+        password: true,
       },
     });
 
-    return members;
+    // Map members to include hasPassword flag
+    return members.map((member) => ({
+      user_id: member.user_id,
+      firstName: member.firstName,
+      lastName: member.lastName,
+      email: member.email,
+      profileImage: member.profileImage,
+      role: member.role,
+      allowPersonalEmailSync: member.allowPersonalEmailSync,
+      hasPassword: !!member.password, 
+    }));
   }
-  
-
 }
