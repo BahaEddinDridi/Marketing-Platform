@@ -2,9 +2,27 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import * as cookieParser from 'cookie-parser';
+import * as session from 'express-session';
+
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { abortOnError: false });
+
+  app.use(
+    session({
+      secret: process.env.SESSION_SECRET, 
+      resave: false,
+      saveUninitialized: false, 
+      cookie: {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict', 
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      },
+    }),
+  );
+
+
   app.use(cookieParser());
   app.enableCors({
     origin: 'http://localhost:3000',

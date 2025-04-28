@@ -34,10 +34,21 @@ model Organization {
   platforms     MarketingPlatform[]
   preferences   MicrosoftPreferences?
   leadConfig    LeadConfiguration?    @relation("OrgToLeadConfig")
+  linkedInPage  LinkedInPage?         @relation("OrgToLinkedInPage")
   created_at    DateTime              @default(now())
   updated_at    DateTime              @updatedAt
 
   @@unique([id])
+}
+
+model LinkedInPage {
+  id           String       @id @default(uuid())
+  orgId        String       @unique @default("single-org")
+  organization Organization @relation("OrgToLinkedInPage", fields: [orgId], references: [id])
+  linkedinId   String       @unique
+  pageName     String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 }
 
 model MicrosoftPreferences {
@@ -46,6 +57,7 @@ model MicrosoftPreferences {
   organization    Organization @relation(fields: [orgId], references: [id])
   signInMethod    Boolean      @default(true)
   leadSyncEnabled Boolean      @default(false)
+  linkedinEnabled Boolean      @default(false)
   created_at      DateTime     @default(now())
   updated_at      DateTime     @updatedAt
 }
@@ -85,12 +97,24 @@ model User {
   refreshToken           String?
   googleId               String?               @unique
   microsoftId            String?               @unique
+  linkedinId             String?               @unique
   allowPersonalEmailSync Boolean               @default(false)
   assignedLeads          Lead[]                @relation("AssignedTo")
   password_tokens        PasswordResetToken[]
   credentials            PlatformCredentials[]
+  linkedInProfile        LinkedInProfile?      @relation("UserToLinkedInProfile")
   created_at             DateTime              @default(now())
   updated_at             DateTime              @updatedAt
+}
+
+model LinkedInProfile {
+  id         String   @id @default(uuid())
+  userId     String   @unique
+  user       User     @relation("UserToLinkedInProfile", fields: [userId], references: [user_id])
+  linkedinId String   @unique
+  email      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 model PasswordResetToken {
@@ -163,7 +187,7 @@ model Lead {
   phone           String?
   company         String?
   job_title       String?
-  leadEmails      LeadEmail[]   @relation("LeadToEmail")
+  leadEmails      LeadEmail[]  @relation("LeadToEmail")
   status          LeadStatus
   created_at      DateTime     @default(now())
   updated_at      DateTime     @updatedAt
@@ -184,7 +208,7 @@ model LeadAttachment {
 
 model LeadEmail {
   id               String           @id @default(uuid())
-  leadId           String           
+  leadId           String
   lead             Lead             @relation("LeadToEmail", fields: [leadId], references: [lead_id], onDelete: Cascade)
   subject          String
   body             String           @db.Text

@@ -193,7 +193,12 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Redirect()
   async connectMicrosoft(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string; orgId: string; role: string };
+    const user = req.user as {
+      user_id: string;
+      email: string;
+      orgId: string;
+      role: string;
+    };
     return this.authService.connectMicrosoft(user.user_id);
   }
 
@@ -201,9 +206,14 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   async disconnectMicrosoft(@Req() req: AuthenticatedRequest) {
     const user = req.user as { user_id: string; email: string; orgId: string };
-    const userRecord = await this.prisma.user.findUnique({ where: { user_id: user.user_id } });
+    const userRecord = await this.prisma.user.findUnique({
+      where: { user_id: user.user_id },
+    });
     if (!userRecord || userRecord.role !== 'ADMIN') {
-      throw new HttpException('Only admins can disconnect Microsoft', HttpStatus.FORBIDDEN);
+      throw new HttpException(
+        'Only admins can disconnect Microsoft',
+        HttpStatus.FORBIDDEN,
+      );
     }
 
     return this.authService.disconnectMicrosoft(user.user_id);
@@ -214,7 +224,52 @@ export class AuthController {
     const preferences = await this.prisma.microsoftPreferences.findUnique({
       where: { orgId: 'single-org' },
     });
-    console.log('Preferences:', preferences);
-    return { signInMethod: preferences?.signInMethod ?? true, leadSyncEnabled: preferences?.leadSyncEnabled ?? false, };
+    return {
+      signInMethod: preferences?.signInMethod ?? true,
+      leadSyncEnabled: preferences?.leadSyncEnabled ?? false,
+      linkedinAuthEnabled: preferences?.linkedinEnabled ?? false,
+    };
+  }
+
+  ///////////////////////// LINKEDIN ////////////////////////
+  @Post('linkedin/page/connect')
+  @UseGuards(JwtAuthGuard)
+  async connectLinkedInPage(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    return this.authService.connectLinkedInPage(user.user_id);
+  }
+
+  @Post('linkedin/connect')
+  @UseGuards(JwtAuthGuard)
+  async connectLinkedInUser(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    return this.authService.connectLinkedInUser(user.user_id);
+  }
+
+  @Get('linkedin')
+  @UseGuards(AuthGuard('linkedin'))
+  async linkedInLogin() {
+    // No session needed; state is passed via OAuth state parameter
+  }
+
+  @Get('linkedin/callback')
+  @UseGuards(AuthGuard('linkedin'))
+  async linkedInAuthRedirect(@Req() req, @Res() res: Response) {
+    const { linkedinId, email, userId, isOrgPage } = req.user;
+    res.redirect('http://localhost:3000/settings');
+  }
+
+  @Post('linkedin/page/disconnect')
+  @UseGuards(JwtAuthGuard)
+  async disconnectLinkedInPage(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    return this.authService.disconnectLinkedInPage(user.user_id);
+  }
+
+  @Post('linkedin/disconnect')
+  @UseGuards(JwtAuthGuard)
+  async disconnectLinkedInUser(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    return this.authService.disconnectLinkedInUser(user.user_id);
   }
 }

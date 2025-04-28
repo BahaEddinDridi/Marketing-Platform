@@ -6,6 +6,8 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { MicrosoftLeadsStrategy } from 'src/strategies/microsoft-leads.strategy';
 import { OrganizationModule } from 'src/organization/organization.module';
+import { MicrosoftStrategy } from 'src/strategies/microsoft.strategy';
+import { LinkedInStrategy } from 'src/strategies/linkedin.strategy';
 
 @Module({
   imports: [
@@ -18,7 +20,7 @@ import { OrganizationModule } from 'src/organization/organization.module';
     OrganizationModule
   ],
   controllers: [AuthController],
-  providers: [AuthService, MicrosoftLeadsStrategy],
+  providers: [AuthService, MicrosoftLeadsStrategy, MicrosoftStrategy, LinkedInStrategy],
   exports: [AuthService, MicrosoftLeadsStrategy],
 })
 export class AuthModule {}

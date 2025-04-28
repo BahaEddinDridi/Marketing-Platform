@@ -19,6 +19,13 @@ interface MicrosoftTokenResponse {
   expires_in: number;
 }
 
+interface LinkedInTokenResponse {
+  access_token: string;
+  refresh_token?: string;
+  expires_in: number;
+  scope: string;
+}
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -485,10 +492,7 @@ export class AuthService {
     }
   }
 
-  async getMicrosoftToken(
-    orgId: string,
-    scopes: string[],
-  ): Promise<string> {
+  async getMicrosoftToken(orgId: string, scopes: string[]): Promise<string> {
     const platform = await this.prisma.marketingPlatform.findFirst({
       where: { orgId, platform_name: 'Microsoft' },
     });
@@ -521,7 +525,7 @@ export class AuthService {
     this.logger.log(
       `Updating Microsoft credentials for org (email: ${email}, type: ${type})`,
     );
-  
+
     // Find the organization
     const org = await this.prisma.organization.findUnique({
       where: { id: 'single-org' },
@@ -530,7 +534,7 @@ export class AuthService {
       this.logger.error(`Organization not found for id: single-org`);
       throw new Error('Organization not found');
     }
-  
+
     // Fetch tenantId by decoding the access token
     let tenantId: string | null = null;
     try {
@@ -542,12 +546,16 @@ export class AuthService {
         });
         this.logger.log(`Updated tenantId for org ${org.id}: ${tenantId}`);
       } else {
-        this.logger.warn(`Invalid or placeholder tenantId for email: ${email}: ${tenantId}`);
+        this.logger.warn(
+          `Invalid or placeholder tenantId for email: ${email}: ${tenantId}`,
+        );
       }
     } catch (error) {
-      this.logger.error(`Failed to fetch tenantId for email: ${email}: ${error.message}`);
+      this.logger.error(
+        `Failed to fetch tenantId for email: ${email}: ${error.message}`,
+      );
     }
-  
+
     // Upsert MarketingPlatform for Microsoft
     const platform = await this.prisma.marketingPlatform.upsert({
       where: {
@@ -565,15 +573,17 @@ export class AuthService {
         sync_status: 'CONNECTED',
       },
     });
-  
-    const existingCredentials = await this.prisma.platformCredentials.findFirst({
-      where: {
-        platform_id: platform.platform_id,
-        user_id: null, // Org-wide credentials
-        type,
+
+    const existingCredentials = await this.prisma.platformCredentials.findFirst(
+      {
+        where: {
+          platform_id: platform.platform_id,
+          user_id: null, // Org-wide credentials
+          type,
+        },
       },
-    });
-  
+    );
+
     if (existingCredentials) {
       // Update existing credentials
       await this.prisma.platformCredentials.update({
@@ -608,5 +618,320 @@ export class AuthService {
   async getTenantIdFromToken(token: string): Promise<string> {
     const decoded = this.jwtService.decode(token) as any;
     return decoded?.tid || 'tenant-id-placeholder'; // Replace with actual logic
+  }
+
+  /////////////////////////// LINKEDIN ///////////////////////////////////
+
+  async connectLinkedInPage(userId: string) {
+    this.logger.log(`Connecting LinkedIn page for user ${userId}`);
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+    });
+    if (!user) throw new UnauthorizedException('User not found');
+
+    if (user.role !== 'ADMIN')
+      throw new ForbiddenException('Only admins can connect LinkedIn page');
+
+    const org = await this.prisma.organization.findUnique({
+      where: { id: 'single-org' },
+    });
+    if (!org) throw new Error('Single organization not found');
+    await this.prisma.microsoftPreferences.upsert({
+      where: { orgId: 'single-org' },
+      create: { orgId: 'single-org', linkedinEnabled: true },
+      update: { linkedinEnabled: true },
+    });
+    const state = JSON.stringify({ type: 'page', userId });
+
+    this.logger.log(`LinkedIn page connection initiated for org ${org.id}`);
+    return {
+      url: `http://localhost:5000/auth/linkedin?state=${encodeURIComponent(state)}`,
+    };
+  }
+
+  async disconnectLinkedInPage(userId: string) {
+    this.logger.log(`Disconnecting LinkedIn page for user ${userId}`);
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+    });
+    if (!user) throw new UnauthorizedException('User not found');
+
+    if (user.role !== 'ADMIN')
+      throw new ForbiddenException('Only admins can disconnect LinkedIn page');
+
+    const platform = await this.prisma.marketingPlatform.findFirst({
+      where: { orgId: 'single-org', platform_name: 'LinkedIn' },
+    });
+    if (!platform) throw new Error('LinkedIn platform not found');
+
+    await this.prisma.$transaction(async (prisma) => {
+      await prisma.platformCredentials.deleteMany({
+        where: {
+          platform_id: platform.platform_id,
+          user_id: null,
+          type: 'AUTH',
+        },
+      });
+      await prisma.linkedInPage.deleteMany({
+        where: { orgId: 'single-org' },
+      });
+      await prisma.microsoftPreferences.update({
+        where: { orgId: 'single-org' },
+        data: { linkedinEnabled: false },
+      });
+    });
+
+    this.logger.log(`LinkedIn page disconnected for org single-org`);
+    return { message: 'LinkedIn page disconnected successfully' };
+  }
+
+  async connectLinkedInUser(userId: string) {
+    this.logger.log(`Connecting LinkedIn account for user ${userId}`);
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+    });
+    if (!user) throw new UnauthorizedException('User not found');
+
+    const state = JSON.stringify({ type: 'user', userId });
+
+    this.logger.log(`LinkedIn account connection initiated for user ${userId}`);
+    return {
+      url: `http://localhost:5000/auth/linkedin?state=${encodeURIComponent(state)}`,
+    };
+  }
+
+  async disconnectLinkedInUser(userId: string) {
+    this.logger.log(`Disconnecting LinkedIn account for user ${userId}`);
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+    });
+    if (!user) throw new UnauthorizedException('User not found');
+
+    const platform = await this.prisma.marketingPlatform.findFirst({
+      where: { orgId: 'single-org', platform_name: 'LinkedIn' },
+    });
+    if (!platform) throw new Error('LinkedIn platform not found');
+
+    await this.prisma.$transaction(async (prisma) => {
+      await prisma.platformCredentials.deleteMany({
+        where: {
+          platform_id: platform.platform_id,
+          user_id: user.user_id,
+          type: 'AUTH',
+        },
+      });
+      await prisma.linkedInProfile.deleteMany({
+        where: { userId: user.user_id },
+      });
+      await prisma.user.update({
+        where: { user_id: user.user_id },
+        data: { linkedinId: null },
+      });
+    });
+
+    this.logger.log(`LinkedIn account disconnected for user ${userId}`);
+    return { message: 'LinkedIn account disconnected successfully' };
+  }
+
+  async updateLinkedInCredentials(
+    linkedinId: string,
+    nameOrEmail: string,
+    accessToken: string,
+    refreshToken: string | null,
+    expiresIn: number,
+    scopes: string[],
+    type: 'AUTH',
+    userId: string | null,
+  ) {
+    this.logger.log(
+      `Updating LinkedIn credentials for ${userId ? `user ${userId}` : 'org'} (name/email: ${nameOrEmail}, type: ${type})`,
+    );
+  
+    const org = await this.prisma.organization.findUnique({
+      where: { id: 'single-org' },
+    });
+    if (!org) {
+      this.logger.error(`Organization not found for id: single-org`);
+      throw new Error('Organization not found');
+    }
+  
+    const platform = await this.prisma.marketingPlatform.upsert({
+      where: {
+        orgId_platform_name: {
+          orgId: org.id,
+          platform_name: 'LinkedIn',
+        },
+      },
+      create: {
+        orgId: org.id,
+        platform_name: 'LinkedIn',
+        sync_status: 'CONNECTED',
+      },
+      update: {
+        sync_status: 'CONNECTED',
+      },
+    });
+  
+    if (userId) {
+      const user = await this.prisma.user.findUnique({
+        where: { user_id: userId },
+      });
+      if (!user) throw new UnauthorizedException('User not found');
+  
+      await this.prisma.linkedInProfile.upsert({
+        where: { userId: user.user_id },
+        create: {
+          userId: user.user_id,
+          linkedinId,
+          email: nameOrEmail, // Store email for user profiles
+        },
+        update: {
+          linkedinId,
+          email: nameOrEmail,
+        },
+      });
+  
+      await this.prisma.user.update({
+        where: { user_id: user.user_id },
+        data: { linkedinId },
+      });
+    } else {
+      await this.prisma.linkedInPage.upsert({
+        where: { orgId: 'single-org' },
+        create: {
+          orgId: 'single-org',
+          linkedinId,
+          pageName: nameOrEmail || 'Innoway Solutions', // Store page name for org pages
+        },
+        update: {
+          linkedinId,
+          pageName: nameOrEmail || 'Innoway Solutions',
+        },
+      });
+    }
+  
+    const existingCredentials = await this.prisma.platformCredentials.findFirst({
+      where: {
+        platform_id: platform.platform_id,
+        user_id: userId,
+        type,
+      },
+    });
+  
+    if (existingCredentials) {
+      await this.prisma.platformCredentials.update({
+        where: { credential_id: existingCredentials.credential_id },
+        data: {
+          access_token: accessToken,
+          refresh_token: refreshToken,
+          scopes, // Store actual granted scopes
+          expires_at: new Date(Date.now() + expiresIn * 1000),
+        },
+      });
+    } else {
+      await this.prisma.platformCredentials.create({
+        data: {
+          platform_id: platform.platform_id,
+          user_id: userId,
+          type,
+          access_token: accessToken,
+          refresh_token: refreshToken,
+          scopes,
+          expires_at: new Date(Date.now() + expiresIn * 1000),
+        },
+      });
+    }
+  
+    this.logger.log(
+      `LinkedIn credentials updated for ${userId ? `user ${userId}` : `org ${org.id}`}, name/email: ${nameOrEmail}, type: ${type}`,
+    );
+    return { message: 'LinkedIn credentials updated' };
+  }
+
+  async refreshLinkedInToken(
+    orgId: string,
+    scopes: string[],
+    userId: string | null,
+  ): Promise<string> {
+    const platform = await this.prisma.marketingPlatform.findFirst({
+      where: { orgId, platform_name: 'LinkedIn' },
+    });
+    if (!platform) throw new Error('No LinkedIn platform found');
+
+    const creds = await this.prisma.platformCredentials.findFirst({
+      where: {
+        platform_id: platform.platform_id,
+        user_id: userId,
+        scopes: { hasEvery: scopes },
+      },
+    });
+    if (!creds || !creds.refresh_token)
+      throw new Error('No valid refresh token');
+
+    try {
+      const clientId = this.configService.get('LINKEDIN_CLIENT_ID');
+      const clientSecret = this.configService.get('LINKEDIN_CLIENT_SECRET');
+
+      if (!clientId || !clientSecret) {
+        throw new Error('Missing LinkedIn OAuth configuration');
+      }
+
+      const response = await axios.post<LinkedInTokenResponse>(
+        'https://www.linkedin.com/oauth/v2/accessToken',
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: creds.refresh_token,
+          client_id: clientId,
+          client_secret: clientSecret,
+        }).toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
+      );
+
+      const { access_token, refresh_token, expires_in } = response.data;
+
+      await this.prisma.platformCredentials.update({
+        where: { credential_id: creds.credential_id },
+        data: {
+          access_token,
+          refresh_token: refresh_token || creds.refresh_token,
+          expires_at: new Date(Date.now() + expires_in * 1000),
+          updated_at: new Date(),
+        },
+      });
+
+      return access_token;
+    } catch (error) {
+      this.logger.error(
+        `Failed to refresh LinkedIn token: ${error.message}`,
+        error.response?.data,
+      );
+      throw new Error('No valid credentials');
+    }
+  }
+
+  async getLinkedInToken(
+    orgId: string,
+    scopes: string[],
+    userId: string | null,
+  ): Promise<string> {
+    const platform = await this.prisma.marketingPlatform.findFirst({
+      where: { orgId, platform_name: 'LinkedIn' },
+    });
+    if (!platform) throw new Error('No LinkedIn platform found');
+
+    const creds = await this.prisma.platformCredentials.findFirst({
+      where: {
+        platform_id: platform.platform_id,
+        user_id: userId,
+        scopes: { hasEvery: scopes },
+      },
+    });
+    if (!creds || !creds.refresh_token) throw new Error('No valid credentials');
+
+    const isExpired =
+      creds.expires_at && new Date(creds.expires_at) < new Date();
+    if (!isExpired && creds.access_token) return creds.access_token;
+
+    return this.refreshLinkedInToken(orgId, scopes, userId);
   }
 }
