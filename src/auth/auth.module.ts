@@ -8,6 +8,7 @@ import { MicrosoftLeadsStrategy } from 'src/strategies/microsoft-leads.strategy'
 import { OrganizationModule } from 'src/organization/organization.module';
 import { MicrosoftStrategy } from 'src/strategies/microsoft.strategy';
 import { LinkedInStrategy } from 'src/strategies/linkedin.strategy';
+import { FacebookStrategy } from 'src/strategies/facebook.strategy';
 
 @Module({
   imports: [
@@ -20,7 +21,7 @@ import { LinkedInStrategy } from 'src/strategies/linkedin.strategy';
     OrganizationModule
   ],
   controllers: [AuthController],
-  providers: [AuthService, MicrosoftLeadsStrategy, MicrosoftStrategy, LinkedInStrategy],
+  providers: [AuthService, MicrosoftLeadsStrategy, MicrosoftStrategy, LinkedInStrategy, FacebookStrategy],
   exports: [AuthService, MicrosoftLeadsStrategy],
 })
 export class AuthModule {}

@@ -934,4 +934,60 @@ export class AuthService {
 
     return this.refreshLinkedInToken(orgId, scopes, userId);
   }
+
+  /////////////////////////// META ///////////////////////////////////
+
+
+  async connectMetaUser(profile: {
+    facebookId: string;
+    firstName: string;
+    lastName?: string;
+    email?: string;
+    accessToken: string;
+    refreshToken?: string;
+  }) {
+    // Upsert Meta profile
+    const metaProfile = await this.prisma.metaProfile.upsert({
+      where: { userId: profile.facebookId },
+      update: {
+        firstName: profile.firstName,
+        lastName: profile.lastName,
+        email: profile.email,
+        updatedAt: new Date(),
+      },
+      create: {
+        userId: profile.facebookId,
+        firstName: profile.firstName,
+        lastName: profile.lastName,
+        email: profile.email,
+      },
+    });
+
+    // Store credentials
+    await this.prisma.platformCredentials.upsert({
+      where: {
+        platform_userId_orgId: {
+          platform: 'facebook',
+          userId: profile.facebookId,
+          orgId: null,
+        },
+      },
+      update: {
+        accessToken: profile.accessToken,
+        refreshToken: profile.refreshToken,
+        expiresAt: null, // Facebook tokens don't expire in Development Mode
+        updatedAt: new Date(),
+      },
+      create: {
+        platform: 'facebook',
+        userId: profile.facebookId,
+        orgId: null,
+        accessToken: profile.accessToken,
+        refreshToken: profile.refreshToken,
+        expiresAt: null,
+      },
+    });
+
+    return metaProfile;
+  }
 }
