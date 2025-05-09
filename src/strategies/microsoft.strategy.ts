@@ -22,9 +22,6 @@ export class MicrosoftStrategy extends PassportStrategy(Strategy, 'microsoft') {
   }
 
   async validate(accessToken: string, refreshToken: string, profile: Profile, done: Function) {
-
-    
-
     const { id, displayName, emails, _json } = profile;
     const email = emails?.[0]?.value || _json.mail;
     if (!email) return done(new Error('No email found'), null);
@@ -41,7 +38,6 @@ export class MicrosoftStrategy extends PassportStrategy(Strategy, 'microsoft') {
     });
 
     if (org) {
-      // Organization exists, check preferences
       const preferences = await this.prisma.microsoftPreferences.findUnique({
         where: { orgId: 'single-org' },
       });

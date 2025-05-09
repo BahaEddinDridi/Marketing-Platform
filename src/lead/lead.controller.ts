@@ -45,6 +45,13 @@ export class LeadController {
     return this.leadService.fetchLeadsByUserId(user.orgId, user.user_id);
   }
 
+  @Get('conversation/:leadId')
+  @UseGuards(JwtAuthGuard)
+  async getLeadConversation(@Param('leadId') leadId: string) {
+    return this.leadService.fetchLeadConversation(leadId);
+  }
+
+  
   @Post('update-status')
   @UseGuards(JwtAuthGuard)
   async updateLeadStatus(@Body() body: { leadId: string; status: string }) {

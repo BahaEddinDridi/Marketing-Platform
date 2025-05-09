@@ -19,6 +19,8 @@ import { MicrosoftStrategy } from './strategies/microsoft.strategy';
 import { MicrosoftLeadsStrategy } from './strategies/microsoft-leads.strategy';
 import { OrganizationModule } from './organization/organization.module';
 import { ScheduleModule } from '@nestjs/schedule';
+import { EmailTemplateModule } from './email-template/email-template.module';
+import { AutoReplyModule } from './auto-reply/auto-reply.module';
 
 @Module({
   imports: [
@@ -41,6 +43,8 @@ import { ScheduleModule } from '@nestjs/schedule';
     AnalyticsModule,
     PasswordResetModule,
     OrganizationModule,
+    EmailTemplateModule,
+    AutoReplyModule,
   ],
   controllers: [AppController],
   providers: [

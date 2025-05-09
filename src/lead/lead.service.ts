@@ -1,4 +1,11 @@
-import { ForbiddenException, HttpException, HttpStatus, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { AuthService } from 'src/auth/auth.service';
 import { ConfigService } from '@nestjs/config';
@@ -6,6 +13,7 @@ import axios from 'axios';
 import * as schedule from 'node-schedule';
 import { v2 as cloudinary } from 'cloudinary';
 import { Readable } from 'stream';
+import { LeadStatus } from '@prisma/client';
 
 interface GraphEmailResponse {
   value: {
@@ -16,14 +24,29 @@ interface GraphEmailResponse {
     bodyPreview?: string;
     hasAttachments: boolean;
     receivedDateTime: string;
-    attachments?: { id: string; name: string; contentBytes: string; contentType: string }[];
+    conversationId: string;
+    internetMessageId?: string;
+    toRecipients?: { emailAddress: { address: string; name?: string } }[];
+    ccRecipients?: { emailAddress: { address: string; name?: string } }[];
+    bccRecipients?: { emailAddress: { address: string; name?: string } }[];
+    attachments?: {
+      id: string;
+      name: string;
+      contentBytes: string;
+      contentType: string;
+    }[];
   }[];
   '@odata.deltaLink'?: string;
   '@odata.nextLink'?: string;
 }
 
 interface AttachmentResponse {
-  value: { id: string; name: string; contentBytes: string; contentType: string }[];
+  value: {
+    id: string;
+    name: string;
+    contentBytes: string;
+    contentType: string;
+  }[];
 }
 
 interface Mailbox {
@@ -37,6 +60,16 @@ interface Folder {
   name: string;
 }
 
+interface EmailTemplate {
+  id: string;
+  orgId: string;
+  name: string;
+  subject: string;
+  body: string;
+  isActive: boolean;
+}
+
+
 @Injectable()
 export class LeadService {
   private readonly logger = new Logger(LeadService.name);
@@ -48,7 +81,12 @@ export class LeadService {
   };
   private jobs = new Map<string, schedule.Job>();
   private readonly platformName = 'Microsoft';
-  private readonly scopes = ['mail.read', 'user.read', 'offline_access'];
+  private readonly scopes = [
+    'mail.read',
+    'mail.send',
+    'user.read',
+    'offline_access',
+  ];
 
   constructor(
     private readonly prisma: PrismaService,
@@ -62,7 +100,9 @@ export class LeadService {
     });
     this.startDynamicSync();
   }
-
+  private async delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
   async findAll() {
     return this.prisma.lead.findMany();
   }
@@ -82,7 +122,10 @@ export class LeadService {
     });
     if (!preferences?.leadSyncEnabled) {
       this.logger.log(`Lead syncing disabled for org ${orgId}`);
-      return { valid: false, response: { needsAuth: false, message: 'Lead syncing is disabled' } };
+      return {
+        valid: false,
+        response: { needsAuth: false, message: 'Lead syncing is disabled' },
+      };
     }
 
     const org = await this.prisma.organization.findUnique({
@@ -101,7 +144,7 @@ export class LeadService {
     const platform = await this.prisma.marketingPlatform.findFirst({
       where: { orgId, platform_name: this.platformName },
     });
-  
+
     if (!platform) {
       this.logger.error(`Microsoft platform not found for org ${orgId}`);
       return {
@@ -109,7 +152,7 @@ export class LeadService {
         authUrl: 'http://localhost:5000/auth/microsoft/leads',
       };
     }
-  
+
     const creds = await this.prisma.platformCredentials.findFirst({
       where: {
         platform_id: platform.platform_id,
@@ -117,7 +160,7 @@ export class LeadService {
         type: 'LEADS',
       },
     });
-  
+
     if (!creds) {
       this.logger.error(`No LEADS credentials found for org ${orgId}`);
       return {
@@ -125,11 +168,14 @@ export class LeadService {
         authUrl: 'http://localhost:5000/auth/microsoft/leads',
       };
     }
-  
+
     return { creds, needsAuth: false };
   }
 
-  private async getMailboxes(orgId: string, sharedMailbox: string): Promise<Mailbox[]> {
+  private async getMailboxes(
+    orgId: string,
+    sharedMailbox: string,
+  ): Promise<Mailbox[]> {
     const members = await this.prisma.user.findMany({
       where: { orgId, allowPersonalEmailSync: true },
       select: { user_id: true, email: true },
@@ -145,69 +191,157 @@ export class LeadService {
     ];
   }
 
-  private async getFolders(orgId: string, token: string, mailboxEmail: string): Promise<Folder[]> {
+  private async getFolders(
+    orgId: string,
+    token: string,
+    mailboxEmail: string,
+  ): Promise<Folder[]> {
     const leadConfig = await this.prisma.leadConfiguration.findUnique({
       where: { orgId },
     });
-  
+
     if (leadConfig?.folders) {
-      return Object.entries(leadConfig.folders).map(([id, name]) => ({ id, name }));
+      return Object.entries(leadConfig.folders).map(([id, name]) => ({
+        id,
+        name,
+      }));
     }
-  
+
     try {
-      const response = await axios.get<{ value: { id: string; displayName: string; wellKnownName?: string }[] }>(
-        `https://graph.microsoft.com/v1.0/users/${mailboxEmail}/mailFolders`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { $top: 50 },
-        },
-      );
-  
+      const response = await axios.get<{
+        value: { id: string; displayName: string; wellKnownName?: string }[];
+      }>(`https://graph.microsoft.com/v1.0/users/${mailboxEmail}/mailFolders`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { $top: 50 },
+      });
+
       const folders = response.data.value
-        .filter((folder) => 
-          folder.wellKnownName?.toLowerCase() === 'inbox' || 
-          folder.wellKnownName?.toLowerCase() === 'junkemail' ||
-          folder.displayName.toLowerCase().includes('inbox') ||
-          folder.displayName.toLowerCase().includes('junk')
+        .filter(
+          (folder) =>
+            folder.wellKnownName?.toLowerCase() === 'inbox' ||
+            folder.wellKnownName?.toLowerCase() === 'junkemail' ||
+            folder.displayName.toLowerCase().includes('inbox') ||
+            folder.displayName.toLowerCase().includes('junk'),
         )
         .map((folder) => ({
           id: folder.id,
           name: folder.displayName,
         }));
-  
-      this.logger.log(`Fetched folders for ${mailboxEmail}: ${folders.map(f => `${f.name} (${f.id})`).join(', ')}`);
-  
+
+      this.logger.log(
+        `Fetched folders for ${mailboxEmail}: ${folders.map((f) => `${f.name} (${f.id})`).join(', ')}`,
+      );
+
       if (folders.length === 0) {
-        this.logger.warn(`No matching folders found for ${mailboxEmail}, using defaults`);
+        this.logger.warn(
+          `No matching folders found for ${mailboxEmail}, using defaults`,
+        );
         return [
           { name: 'Inbox', id: 'inbox' },
           { name: 'Junk', id: 'junkemail' },
         ];
       }
-  
-      // Update leadConfiguration with fetched folders
+
       await this.prisma.leadConfiguration.upsert({
         where: { orgId },
         update: {
-          folders: Object.fromEntries(folders.map(f => [f.id, f.name])),
+          folders: Object.fromEntries(folders.map((f) => [f.id, f.name])),
         },
         create: {
           orgId,
           filters: ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
-          folders: Object.fromEntries(folders.map(f => [f.id, f.name])),
+          folders: Object.fromEntries(folders.map((f) => [f.id, f.name])),
           syncInterval: 'EVERY_HOUR',
         },
       });
-  
+
       return folders;
     } catch (error) {
-      this.logger.error(`Failed to fetch folders for ${mailboxEmail}: ${error.message}`, error.response?.data);
+      this.logger.error(
+        `Failed to fetch folders for ${mailboxEmail}: ${error.message}`,
+        error.response?.data,
+      );
       return [
         { name: 'Inbox', id: 'inbox' },
         { name: 'Junk', id: 'junkemail' },
       ];
     }
   }
+
+  private async fetchConversationThread(
+    orgId: string,
+    mailboxEmail: string,
+    conversationId: string,
+    token: string,
+  ): Promise<GraphEmailResponse['value']> {
+    try {
+      const encodedMailbox = encodeURIComponent(mailboxEmail);
+
+      const messagesResponse = await axios.get<{ value: { id: string }[] }>(
+        `https://graph.microsoft.com/v1.0/users/${encodedMailbox}/messages`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          params: {
+            $filter: `conversationId eq '${conversationId}'`,
+            $select: 'id',
+            $top: 100,
+          },
+        },
+      );
+
+      const emailPromises = messagesResponse.data.value.map(async ({ id }) => {
+        try {
+          const emailResponse = await axios.get<GraphEmailResponse['value'][0]>(
+            `https://graph.microsoft.com/v1.0/users/${encodedMailbox}/messages/${id}`,
+            {
+              headers: { Authorization: `Bearer ${token}` },
+              params: {
+                $select:
+                  'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body,bodyPreview,hasAttachments,conversationId,internetMessageId',
+              },
+            },
+          );
+
+          const email = emailResponse.data;
+          if (email.hasAttachments) {
+            try {
+              const attachmentResponse = await axios.get<AttachmentResponse>(
+                `https://graph.microsoft.com/v1.0/users/${encodedMailbox}/messages/${id}/attachments`,
+                { headers: { Authorization: `Bearer ${token}` } },
+              );
+              email.attachments = attachmentResponse.data.value;
+            } catch (error) {
+              this.logger.error(
+                `Failed to fetch attachments for email ${id}: ${error.message}`,
+              );
+              email.attachments = [];
+            }
+          }
+          return email;
+        } catch (error) {
+          this.logger.error(`Failed to fetch email ${id}: ${error.message}`);
+          return undefined; 
+        }
+      });
+
+      const emails = (await Promise.all(emailPromises)).filter(
+        (email): email is GraphEmailResponse['value'][0] => email !== undefined,
+      );
+
+      return emails.sort(
+        (a, b) =>
+          new Date(a.receivedDateTime).getTime() -
+          new Date(b.receivedDateTime).getTime(),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to fetch conversation ${conversationId}: ${error.message}`,
+        error.response?.data,
+      );
+      throw error;
+    }
+  }
+
   private async fetchEmails(
     orgId: string,
     mailboxes: Mailbox[],
@@ -219,7 +353,6 @@ export class LeadService {
       this.logger.log(`Fetching leads from ${mailbox.label}`);
 
       const folders = await this.getFolders(orgId, token, mailbox.email);
-
 
       for (const folder of folders) {
         const syncState = await this.prisma.syncState.findUnique({
@@ -238,15 +371,18 @@ export class LeadService {
         const params = syncState?.deltaLink
           ? {}
           : {
-              $top: 100,
-              $select: 'id,subject,from,receivedDateTime,body,bodyPreview,hasAttachments',
+              $top: 50,
+              $select:
+                'id,subject,from,receivedDateTime,body,bodyPreview,hasAttachments,conversationId,internetMessageId',
               $filter: `receivedDateTime ge ${new Date(
                 Date.now() - 30 * 24 * 60 * 60 * 1000,
               ).toISOString()}`,
             };
 
         try {
-          this.logger.log(`Fetching emails from ${url} with params: ${JSON.stringify(params)}`);
+          this.logger.log(
+            `Fetching emails from ${url} with params: ${JSON.stringify(params)}`,
+          );
           const response = await axios.get<GraphEmailResponse>(url, {
             headers: { Authorization: `Bearer ${token}` },
             params,
@@ -256,28 +392,23 @@ export class LeadService {
             `Fetched ${response.data.value.length} emails from ${mailbox.label} - ${folder.name}`,
           );
 
-          const emailsWithAttachments = response.data.value.filter(
-            (email) => email.hasAttachments,
+          const emailsWithAttachments = await Promise.all(
+            response.data.value
+              .filter((email) => email.hasAttachments)
+              .map(async (email) => {
+                try {
+                  const attachmentResponse =
+                    await axios.get<AttachmentResponse>(
+                      `https://graph.microsoft.com/v1.0/users/${mailbox.email}/messages/${email.id}/attachments`,
+                      { headers: { Authorization: `Bearer ${token}` } },
+                    );
+                  email.attachments = attachmentResponse.data.value;
+                } catch (error) {
+                  email.attachments = [];
+                }
+                return email;
+              }),
           );
-          for (const email of emailsWithAttachments) {
-            try {
-              const attachmentResponse = await axios.get<AttachmentResponse>(
-                `https://graph.microsoft.com/v1.0/users/${mailbox.email}/messages/${email.id}/attachments`,
-                { headers: { Authorization: `Bearer ${token}` } },
-              );
-              email.attachments = attachmentResponse.data.value.map((att) => ({
-                id: att.id,
-                name: att.name,
-                contentBytes: att.contentBytes,
-                contentType: att.contentType,
-              }));
-            } catch (attachmentError) {
-              this.logger.error(
-                `Failed to fetch attachments for email ${email.id} in ${mailbox.label}: ${attachmentError.message}`,
-              );
-              email.attachments = [];
-            }
-          }
 
           allEmails = allEmails.concat(response.data.value);
 
@@ -329,28 +460,27 @@ export class LeadService {
     });
 
     if (!leadConfig) {
-      this.logger.warn(`No lead config for org ${orgId}, using defaults`);
-      return this.defaultIsPotentialLead(email);
+      const defaultKeywords = [
+        'inquiry',
+        'interested',
+        'quote',
+        'sales',
+        'meeting',
+      ];
+      const subject = email.subject.toLowerCase();
+      const preview = email.body?.content?.toLowerCase() || '';
+      return defaultKeywords.some(
+        (kw) =>
+          subject.includes(kw) ||
+          defaultKeywords.some((kw) => preview.includes(kw)),
+      );
     }
 
     const subject = email.subject.toLowerCase();
-    const preview = email.body?.content.toLowerCase();
-    const leadKeywords = leadConfig.filters;
-
+    const preview = email.body?.content?.toLowerCase() || '';
     return (
-      leadKeywords.some((kw) => subject.includes(kw)) ||
-      leadKeywords.some((kw) => preview?.includes(kw))
-    );
-  }
-
-  private defaultIsPotentialLead(email: GraphEmailResponse['value'][0]): boolean {
-    const subject = email.subject.toLowerCase();
-    const preview = email.body?.content.toLowerCase();
-    const defaultKeywords = ['inquiry', 'interested', 'quote', 'sales', 'meeting'];
-
-    return (
-      defaultKeywords.some((kw) => subject.includes(kw)) ||
-      defaultKeywords.some((kw) => preview?.includes(kw))
+      leadConfig.filters.some((kw) => subject.includes(kw)) ||
+      leadConfig.filters.some((kw) => preview.includes(kw))
     );
   }
 
@@ -379,8 +509,41 @@ export class LeadService {
       this.logger.log(`Uploaded attachment ${fileName} to Cloudinary`);
       return result;
     } catch (error) {
-      this.logger.error(`Failed to upload ${fileName} to Cloudinary: ${error.message}`);
+      this.logger.error(
+        `Failed to upload ${fileName} to Cloudinary: ${error.message}`,
+      );
       throw error;
+    }
+  }
+
+  private async processEmailAttachments(
+    conversationEmailId: string,
+    attachments: {
+      id: string;
+      name: string;
+      contentBytes: string;
+      contentType: string;
+    }[],
+  ) {
+    for (const attachment of attachments) {
+      try {
+        const cloudinaryUrl = await this.uploadToCloudinary(
+          attachment.name,
+          attachment.contentBytes,
+          attachment.contentType,
+        );
+        await this.prisma.leadAttachment.create({
+          data: {
+            conversationEmailId, // Updated field name
+            fileName: attachment.name,
+            cloudinaryUrl,
+          },
+        });
+      } catch (error) {
+        this.logger.error(
+          `Failed to process attachment ${attachment.name}: ${error.message}`,
+        );
+      }
     }
   }
 
@@ -388,110 +551,221 @@ export class LeadService {
     orgId: string,
     emails: GraphEmailResponse['value'],
     mailboxes: Mailbox[],
+    token: string,
   ) {
-    const potentialLeads = (
-      await Promise.all(emails.map((email) => this.isPotentialLead(email, orgId)))
-    )
-      .map((isLead, index) => (isLead ? emails[index] : null))
-      .filter((email): email is GraphEmailResponse['value'][0] => email !== null);
+    const conversations = new Map<string, GraphEmailResponse['value'][0][]>();
 
-    for (const email of potentialLeads) {
-      const senderEmail = email.from.emailAddress.address;
-      const mailbox = mailboxes.find((m) => m.email === senderEmail) || mailboxes[0];
+    // Group emails by conversation
+    emails.forEach((email) => {
+      if (!email.conversationId) return;
+      if (!conversations.has(email.conversationId)) {
+        conversations.set(email.conversationId, []);
+      }
+      conversations.get(email.conversationId)?.push(email);
+    });
+
+    for (const [conversationId, conversationEmails] of conversations) {
+      const firstEmail = conversationEmails[0];
+      const senderEmail = firstEmail.from.emailAddress.address;
+      const mailbox =
+        mailboxes.find((m) => m.email === senderEmail) || mailboxes[0];
+
+      if (!(await this.isPotentialLead(firstEmail, orgId))) continue;
+
+      // Get full conversation thread
+      let fullConversation: GraphEmailResponse['value'];
+      try {
+        fullConversation = await this.fetchConversationThread(
+          orgId,
+          mailbox.email,
+          conversationId,
+          token,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Using initial emails for conversation ${conversationId}`,
+        );
+        fullConversation = conversationEmails;
+      }
+
+      // Sort chronologically
+      fullConversation.sort(
+        (a, b) =>
+          new Date(a.receivedDateTime).getTime() -
+          new Date(b.receivedDateTime).getTime(),
+      );
+
+      // Create/update lead
       const leadData = {
-        orgId,
-        source_platform: this.platformName,
-        assignedToId: mailbox.assignedToId,
-        name: email.from.emailAddress.name || 'Unknown',
+        organization: { connect: { id: orgId } },
+        source: 'email',
+        assignedTo: mailbox.assignedToId
+          ? { connect: { user_id: mailbox.assignedToId } }
+          : undefined,
+        name: firstEmail.from.emailAddress.name || 'Unknown',
         email: senderEmail,
         phone: null,
         company: null,
         job_title: null,
-        status: 'NEW' as const,
-        created_at: new Date(email.receivedDateTime),
+        initialConversationId: conversationId,
+        status: 'NEW' as LeadStatus,
+        created_at: new Date(firstEmail.receivedDateTime),
       };
 
-      const emailData = {
-        subject: email.subject || 'No Subject',
-        body: email.body?.content || email.bodyPreview || '',
-        hasAttachments: email.hasAttachments || false,
-        receivedDateTime: new Date(email.receivedDateTime),
-        emailId: email.id,
-        senderName: email.from.emailAddress.name || null,
-        senderEmail: senderEmail,
-      };
-
-      const existingLeadEmail = await this.prisma.leadEmail.findUnique({
-        where: { emailId: emailData.emailId },
-      });
-  
-      if (existingLeadEmail) {
-        this.logger.log(`Skipping duplicate email ${emailData.emailId} for lead ${senderEmail}`);
-        continue;
-      }
-
-      const existingLead = await this.prisma.lead.findUnique({
-        where: {
-          org_id_email_source_platform_unique: {
-            orgId,
+      // Use a transaction to ensure atomicity
+      const lead = await this.prisma.$transaction(async (tx) => {
+        // Check for existing non-CLOSED leads with the same orgId and email
+        const existingLead = await tx.lead.findFirst({
+          where: {
             email: leadData.email,
-            source_platform: leadData.source_platform,
+            organization: { id: orgId },
+            status: { not: 'CLOSED' }, // Exclude CLOSED leads
           },
-        },
-      });
-
-      let leadId: string;
-      if (existingLead) {
-        await this.prisma.lead.update({
-          where: { lead_id: existingLead.lead_id },
-          data: leadData,
+          include: {
+            conversations: {
+              select: { conversationId: true },
+            },
+          },
         });
-        leadId = existingLead.lead_id;
-      } else {
-        const newLead = await this.prisma.lead.create({ data: leadData });
-        leadId = newLead.lead_id;
-      }
 
-      const leadEmail = await this.prisma.leadEmail.create({
-        data: {
-          ...emailData,
-          leadId,
-        },
-      });
-
-      if (email.hasAttachments && email.attachments?.length) {
-        for (const attachment of email.attachments) {
-          try {
-            const cloudinaryUrl = await this.uploadToCloudinary(
-              attachment.name,
-              attachment.contentBytes,
-              attachment.contentType,
-            );
-            await this.prisma.leadAttachment.create({
+        if (existingLead) {
+          // Check if this conversation is already associated with the lead
+          const hasConversation = existingLead.conversations.some(
+            (conv) => conv.conversationId === conversationId,
+          );
+          if (!hasConversation) {
+            // Update the existing lead and associate the new conversation later
+            return await tx.lead.update({
+              where: { lead_id: existingLead.lead_id },
               data: {
-                leadEmailId: leadEmail.id,
-                fileName: attachment.name,
-                cloudinaryUrl,
+                name: leadData.name,
+                assignedTo: leadData.assignedTo,
+                status: leadData.status,
+                created_at: leadData.created_at,
+                updated_at: new Date(),
               },
             });
-            this.logger.log(`Stored attachment ${attachment.name} for lead email ${leadEmail.id}`);
-          } catch (attachmentError) {
-            this.logger.error(
-              `Failed to process attachment ${attachment.name} for lead email ${leadEmail.id}: ${attachmentError.message}`,
+          }
+          // If the conversation already exists, return the lead without updating
+          return existingLead;
+        } else {
+          // No non-CLOSED lead exists, create a new lead
+          return await tx.lead.create({
+            data: leadData,
+          });
+        }
+      });
+
+      // Create or update conversation
+      const conversationData = {
+        lead: { connect: { lead_id: lead.lead_id } },
+        conversationId,
+      };
+
+      const existingConversation = await this.prisma.leadConversation.findFirst(
+        {
+          where: { conversationId },
+          include: {
+            lead: {
+              select: { status: true },
+            },
+          },
+        },
+      );
+
+      let conversation;
+      if (existingConversation) {
+        if (existingConversation.lead.status === 'CLOSED') {
+          // If the conversation belongs to a CLOSED lead, create a new conversation
+          conversation = await this.prisma.leadConversation.create({
+            data: conversationData,
+          });
+          this.logger.log(
+            `Created new conversation for lead ${lead.lead_id} with conversationId ${conversationId} (existing conversation belongs to CLOSED lead)`,
+          );
+        } else {
+          // If the conversation belongs to a non-CLOSED lead, update it if necessary
+          if (existingConversation.leadId !== lead.lead_id) {
+            conversation = await this.prisma.leadConversation.update({
+              where: { id: existingConversation.id },
+              data: conversationData,
+            });
+            this.logger.log(
+              `Updated conversation ${existingConversation.id} to point to lead ${lead.lead_id}`,
             );
-            continue;
+          } else {
+            conversation = existingConversation;
+            this.logger.log(
+              `Reusing existing conversation ${conversation.id} for lead ${lead.lead_id}`,
+            );
           }
         }
+      } else {
+        // No existing conversation, create a new one
+        conversation = await this.prisma.leadConversation.create({
+          data: conversationData,
+        });
+        this.logger.log(
+          `Created new conversation ${conversation.id} for lead ${lead.lead_id}`,
+        );
       }
 
-      this.logger.log(
-        existingLead
-          ? `Updated lead for ${leadData.email} with new email ${emailData.emailId}`
-          : `New lead from ${mailbox.label} assigned to ${mailbox.assignedToId || 'Shared'} with email ${emailData.emailId}`,
-      );
-    }
+      // Process all emails in conversation
+      for (const [index, email] of fullConversation.entries()) {
+        const existingEmail = await this.prisma.conversationEmail.findUnique({
+          where: { emailId: email.id },
+        });
 
-    this.logger.log(`Stored ${potentialLeads.length} potential lead emails`);
+        if (existingEmail) continue;
+
+        const isIncoming = email.from?.emailAddress?.address === senderEmail;
+
+        const conversationEmail = await this.prisma.conversationEmail.create({
+          data: {
+            conversation: { connect: { id: conversation.id } },
+            emailId: email.id,
+            subject: email.subject || 'No Subject',
+            body: email.body?.content || email.bodyPreview || '',
+            contentType: email.body?.contentType || 'text',
+            from: {
+              name: email.from?.emailAddress?.name || null,
+              email: email.from?.emailAddress?.address || 'unknown',
+            },
+            to:
+              email.toRecipients?.map((r) => ({
+                name: r.emailAddress?.name || null,
+                email: r.emailAddress?.address || 'unknown',
+              })) || [],
+            cc:
+              email.ccRecipients?.map((r) => ({
+                name: r.emailAddress?.name || null,
+                email: r.emailAddress?.address || 'unknown',
+              })) || [],
+            bcc:
+              email.bccRecipients?.map((r) => ({
+                name: r.emailAddress?.name || null,
+                email: r.emailAddress?.address || 'unknown',
+              })) || [],
+            hasAttachments: email.hasAttachments || false,
+            receivedDateTime: new Date(email.receivedDateTime),
+            isIncoming,
+            isThreadHead: index === 0,
+            inReplyTo: email.internetMessageId,
+          },
+        });
+
+        // Process attachments using the ConversationEmail's ID
+        if (email.hasAttachments && email.attachments?.length) {
+          await this.processEmailAttachments(
+            conversationEmail.id,
+            email.attachments,
+          );
+        }
+
+        // Add a small delay between processing emails
+        await this.delay(200);
+      }
+    }
   }
 
   async fetchAndStoreLeads(orgId: string) {
@@ -502,15 +776,19 @@ export class LeadService {
       const credResult = await this.getPlatformCredentials(orgId);
       if (credResult.needsAuth) return credResult;
 
-      const { creds } = credResult;
+      const token = await this.authService.getMicrosoftToken(
+        orgId,
+        this.scopes,
+      );
 
-      const token = await this.authService.getMicrosoftToken(orgId, this.scopes);
-
-      const mailboxes = await this.getMailboxes(orgId, syncValidation.sharedMailbox!);
+      const mailboxes = await this.getMailboxes(
+        orgId,
+        syncValidation.sharedMailbox!,
+      );
 
       const emails = await this.fetchEmails(orgId, mailboxes, token);
 
-      await this.storeLeads(orgId, emails, mailboxes);
+      await this.storeLeads(orgId, emails, mailboxes, token);
 
       return { needsAuth: false, message: 'Sync Successful' };
     } catch (error) {
@@ -534,7 +812,8 @@ export class LeadService {
       where: { id: orgId },
       include: { leadConfig: true },
     });
-    if (!org) throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
+    if (!org)
+      throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
 
     let updatedLeadConfig;
 
@@ -542,7 +821,13 @@ export class LeadService {
       updatedLeadConfig = await this.prisma.leadConfiguration.create({
         data: {
           orgId,
-          filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
+          filters: data.filters || [
+            'inquiry',
+            'interested',
+            'quote',
+            'sales',
+            'meeting',
+          ],
           folders: data.folders || { inbox: 'Inbox', junkemail: 'Junk' },
           syncInterval: data.syncInterval || 'EVERY_HOUR',
         },
@@ -555,7 +840,8 @@ export class LeadService {
         data: {
           filters: data.filters !== undefined ? data.filters : undefined,
           folders: data.folders !== undefined ? data.folders : undefined,
-          syncInterval: data.syncInterval !== undefined ? data.syncInterval : undefined,
+          syncInterval:
+            data.syncInterval !== undefined ? data.syncInterval : undefined,
         },
       });
 
@@ -581,7 +867,10 @@ export class LeadService {
       where: { user_id: userId },
     });
     if (!user || user.role !== 'ADMIN') {
-      throw new HttpException('Only admins can setup lead sync', HttpStatus.FORBIDDEN);
+      throw new HttpException(
+        'Only admins can setup lead sync',
+        HttpStatus.FORBIDDEN,
+      );
     }
 
     await this.prisma.$transaction(async (prisma) => {
@@ -594,12 +883,24 @@ export class LeadService {
         where: { orgId },
         create: {
           orgId,
-          filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
+          filters: data.filters || [
+            'inquiry',
+            'interested',
+            'quote',
+            'sales',
+            'meeting',
+          ],
           folders: data.folders || { inbox: 'Inbox', junkemail: 'Junk' },
           syncInterval: data.syncInterval || 'EVERY_HOUR',
         },
         update: {
-          filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
+          filters: data.filters || [
+            'inquiry',
+            'interested',
+            'quote',
+            'sales',
+            'meeting',
+          ],
           folders: data.folders || { inbox: 'Inbox', junkemail: 'Junk' },
           syncInterval: data.syncInterval || 'EVERY_HOUR',
         },
@@ -611,16 +912,18 @@ export class LeadService {
   }
 
   async connectLeadSync(userId: string) {
-    this.logger.log(`Connecting Microsoft lead sync for org via user ${userId}`);
+    this.logger.log(
+      `Connecting Microsoft lead sync for org via user ${userId}`,
+    );
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
     if (!user) throw new UnauthorizedException('User not found');
-  
+
     if (user.role !== 'ADMIN') {
       throw new ForbiddenException('Only admins can connect lead sync');
     }
-  
+
     const org = await this.prisma.organization.findUnique({
       where: { id: user.orgId },
       select: { sharedMailbox: true },
@@ -628,14 +931,19 @@ export class LeadService {
     const leadConfig = await this.prisma.leadConfiguration.findUnique({
       where: { orgId: user.orgId },
     });
-  
+
     if (!org?.sharedMailbox || !leadConfig) {
       this.logger.log(`Setup required for org ${user.orgId}`);
       return { needsSetup: true };
     }
-  
+
     const platform = await this.prisma.marketingPlatform.upsert({
-      where: { orgId_platform_name: { orgId: user.orgId, platform_name: this.platformName } },
+      where: {
+        orgId_platform_name: {
+          orgId: user.orgId,
+          platform_name: this.platformName,
+        },
+      },
       create: {
         orgId: user.orgId,
         platform_name: this.platformName,
@@ -645,14 +953,22 @@ export class LeadService {
         sync_status: 'CONNECTED',
       },
     });
-  
+
     // Check for existing org-wide credentials
-    const existingCredentials = await this.prisma.platformCredentials.findFirst({
-      where: { platform_id: platform.platform_id, user_id: null, type: 'LEADS' },
-    });
-  
+    const existingCredentials = await this.prisma.platformCredentials.findFirst(
+      {
+        where: {
+          platform_id: platform.platform_id,
+          user_id: null,
+          type: 'LEADS',
+        },
+      },
+    );
+
     if (existingCredentials) {
-      this.logger.log(`Org-wide credentials already exist for org ${user.orgId}`);
+      this.logger.log(
+        `Org-wide credentials already exist for org ${user.orgId}`,
+      );
       await this.scheduleOrgSync(user.orgId, leadConfig.syncInterval);
       await this.prisma.microsoftPreferences.upsert({
         where: { orgId: user.orgId },
@@ -661,59 +977,74 @@ export class LeadService {
       });
       return { needsAuth: false, message: 'Lead sync already connected' };
     }
-  
+
     await this.prisma.microsoftPreferences.upsert({
       where: { orgId: user.orgId },
       create: { orgId: user.orgId, leadSyncEnabled: true },
       update: { leadSyncEnabled: true },
     });
-  
+
     await this.scheduleOrgSync(user.orgId, leadConfig.syncInterval);
-  
-    this.logger.log(`Initiating Microsoft lead sync auth for org ${user.orgId}`);
-    return { needsAuth: true, authUrl: 'http://localhost:5000/auth/microsoft/leads' };
+
+    this.logger.log(
+      `Initiating Microsoft lead sync auth for org ${user.orgId}`,
+    );
+    return {
+      needsAuth: true,
+      authUrl: 'http://localhost:5000/auth/microsoft/leads',
+    };
   }
 
   async disconnectLeadSync(userId: string) {
-    this.logger.log(`Disconnecting Microsoft lead sync for org via user ${userId}`);
+    this.logger.log(
+      `Disconnecting Microsoft lead sync for org via user ${userId}`,
+    );
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
     if (!user) throw new UnauthorizedException('User not found');
-  
+
     if (user.role !== 'ADMIN') {
       throw new ForbiddenException('Only admins can disconnect lead sync');
     }
-  
+
     const platform = await this.prisma.marketingPlatform.findFirst({
       where: { orgId: user.orgId, platform_name: this.platformName },
     });
-    if (!platform) throw new HttpException('Microsoft platform not found', HttpStatus.NOT_FOUND);
-  
+    if (!platform)
+      throw new HttpException(
+        'Microsoft platform not found',
+        HttpStatus.NOT_FOUND,
+      );
+
     await this.prisma.$transaction(async (prisma) => {
       // Delete org-wide credentials
       await prisma.platformCredentials.deleteMany({
-        where: { platform_id: platform.platform_id, user_id: null, type: 'LEADS' },
+        where: {
+          platform_id: platform.platform_id,
+          user_id: null,
+          type: 'LEADS',
+        },
       });
-  
+
       await prisma.microsoftPreferences.update({
         where: { orgId: user.orgId },
         data: { leadSyncEnabled: false },
       });
-  
+
       await prisma.marketingPlatform.update({
         where: { platform_id: platform.platform_id },
         data: { sync_status: 'DISCONNECTED' },
       });
     });
-  
+
     const job = this.jobs.get(user.orgId);
     if (job) {
       job.cancel();
       this.jobs.delete(user.orgId);
       this.logger.log(`Cancelled sync job for org ${user.orgId}`);
     }
-  
+
     this.logger.log(`Microsoft lead sync disconnected for org ${user.orgId}`);
     return {
       message: 'Microsoft lead sync disconnected.',
@@ -732,22 +1063,36 @@ export class LeadService {
     });
     if (!platform) {
       this.logger.log(`No Microsoft platform found for org ${user.orgId}`);
-      return { needsAuth: true, authUrl: 'http://localhost:5000/auth/microsoft/leads' };
+      return {
+        needsAuth: true,
+        authUrl: 'http://localhost:5000/auth/microsoft/leads',
+      };
     }
 
-    const existingCredentials = await this.prisma.platformCredentials.findFirst({
-      where: { platform_id: platform.platform_id, user_id: userId, type: 'LEADS' },
-    });
+    const existingCredentials = await this.prisma.platformCredentials.findFirst(
+      {
+        where: {
+          platform_id: platform.platform_id,
+          user_id: userId,
+          type: 'LEADS',
+        },
+      },
+    );
     if (existingCredentials) {
       this.logger.log(`User ${userId} already has LEADS credentials`);
       return { needsAuth: false, message: 'Already connected' };
     }
 
-    return { needsAuth: true, authUrl: 'http://localhost:5000/auth/microsoft/leads' };
+    return {
+      needsAuth: true,
+      authUrl: 'http://localhost:5000/auth/microsoft/leads',
+    };
   }
 
   async disconnectMemberLeadSync(userId: string) {
-    this.logger.log(`Disconnecting member Microsoft lead sync for user ${userId}`);
+    this.logger.log(
+      `Disconnecting member Microsoft lead sync for user ${userId}`,
+    );
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
@@ -756,13 +1101,23 @@ export class LeadService {
     const platform = await this.prisma.marketingPlatform.findFirst({
       where: { orgId: user.orgId, platform_name: this.platformName },
     });
-    if (!platform) throw new HttpException('Microsoft platform not found', HttpStatus.NOT_FOUND);
+    if (!platform)
+      throw new HttpException(
+        'Microsoft platform not found',
+        HttpStatus.NOT_FOUND,
+      );
 
     await this.prisma.platformCredentials.deleteMany({
-      where: { platform_id: platform.platform_id, user_id: userId, type: 'LEADS' },
+      where: {
+        platform_id: platform.platform_id,
+        user_id: userId,
+        type: 'LEADS',
+      },
     });
 
-    this.logger.log(`Member Microsoft lead sync disconnected for user ${userId}`);
+    this.logger.log(
+      `Member Microsoft lead sync disconnected for user ${userId}`,
+    );
     return { message: 'Member Microsoft lead sync disconnected' };
   }
 
@@ -802,7 +1157,9 @@ export class LeadService {
       select: { leadSyncEnabled: true },
     });
     if (!preferences?.leadSyncEnabled) {
-      this.logger.log(`Lead sync disabled for org ${orgId}, skipping scheduling`);
+      this.logger.log(
+        `Lead sync disabled for org ${orgId}, skipping scheduling`,
+      );
       return;
     }
 
@@ -815,7 +1172,9 @@ export class LeadService {
     const interval = syncInterval || 'EVERY_HOUR';
     const cronExpression = this.cronMap[interval] || this.cronMap.EVERY_HOUR;
 
-    this.logger.log(`Scheduling org ${orgId} with ${interval} (${cronExpression})`);
+    this.logger.log(
+      `Scheduling org ${orgId} with ${interval} (${cronExpression})`,
+    );
 
     const job = schedule.scheduleJob(cronExpression, async () => {
       this.logger.log(`Syncing leads for org ${orgId}`);
@@ -838,7 +1197,8 @@ export class LeadService {
         where: { user_id: userId },
         select: { role: true },
       });
-      if (!user) throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+      if (!user)
+        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
 
       const whereClause =
         user.role === 'ADMIN'
@@ -852,8 +1212,13 @@ export class LeadService {
         where: whereClause,
         orderBy: { created_at: 'desc' },
         include: {
-          leadEmails: {
-            include: { attachments: true },
+          assignedTo: {
+            select: {
+              user_id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
           },
         },
       });
@@ -863,23 +1228,68 @@ export class LeadService {
       return {
         leads: leads.map((lead) => ({
           leadId: lead.lead_id,
-          sourcePlatform: lead.source_platform,
+          source: lead.source,
           name: lead.name,
           email: lead.email,
           phone: lead.phone,
           company: lead.company,
           jobTitle: lead.job_title,
           status: lead.status,
-          createdAt: lead.created_at.toISOString(),
-          emails: lead.leadEmails.map((leadEmail) => ({
-            subject: leadEmail.subject,
-            body: leadEmail.body,
-            hasAttachments: leadEmail.hasAttachments,
-            receivedDateTime: leadEmail.receivedDateTime.toISOString(),
-            emailId: leadEmail.emailId,
-            senderName: leadEmail.senderName,
-            senderEmail: leadEmail.senderEmail,
-            attachments: leadEmail.attachments.map((att) => ({
+          assignedTo: lead.assignedTo,
+          createdAt: lead.created_at,
+        })),
+      };
+    } catch (error) {
+      this.logger.error('Error fetching leads: ', error.message);
+      throw new HttpException(
+        'Failed to fetch leads',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  async fetchLeadConversation(leadId: string) {
+    this.logger.log(`Fetching conversation for leadId: ${leadId}`);
+
+    try {
+      const lead = await this.prisma.lead.findUnique({
+        where: { lead_id: leadId },
+        include: {
+          conversations: {
+            include: {
+              emails: {
+                include: {
+                  attachments: true,
+                },
+                orderBy: { receivedDateTime: 'asc' },
+              },
+            },
+          },
+        },
+      });
+
+      if (!lead) {
+        throw new HttpException('Lead not found', HttpStatus.NOT_FOUND);
+      }
+
+      return {
+        leadId: lead.lead_id,
+        conversations: lead.conversations.map((conversation) => ({
+          conversationId: conversation.conversationId,
+          emails: conversation.emails.map((email) => ({
+            id: email.id,
+            subject: email.subject,
+            body: email.body,
+            contentType: email.contentType,
+            from: email.from,
+            to: email.to,
+            cc: email.cc,
+            bcc: email.bcc,
+            hasAttachments: email.hasAttachments,
+            receivedDateTime: email.receivedDateTime,
+            isIncoming: email.isIncoming,
+            isThreadHead: email.isThreadHead,
+            attachments: email.attachments.map((att) => ({
               id: att.id,
               fileName: att.fileName,
               cloudinaryUrl: att.cloudinaryUrl,
@@ -888,8 +1298,13 @@ export class LeadService {
         })),
       };
     } catch (error) {
-      this.logger.error('Error fetching leads: ', error.message);
-      throw new HttpException('Failed to fetch leads', HttpStatus.INTERNAL_SERVER_ERROR);
+      this.logger.error(
+        `Error fetching conversation for lead ${leadId}: ${error.message}`,
+      );
+      throw new HttpException(
+        'Failed to fetch lead conversation',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -908,6 +1323,8 @@ export class LeadService {
       phone?: string | null;
       company?: string | null;
       jobTitle?: string | null;
+      status?: LeadStatus;
+      assignedToId?: string | null;
     },
   ) {
     this.logger.log(
@@ -922,43 +1339,46 @@ export class LeadService {
           phone: data.phone,
           company: data.company,
           job_title: data.jobTitle,
+          status: data.status,
+          assignedToId: data.assignedToId,
         },
         include: {
-          leadEmails: {
-            include: { attachments: true },
+          assignedTo: {
+            select: {
+              user_id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+          conversations: {
+            include: {
+              emails: {
+                include: {
+                  attachments: true,
+                },
+              },
+            },
           },
         },
       });
 
       this.logger.log(`Lead ${leadId} updated successfully`);
       return {
-        leadId: updatedLead.lead_id,
-        sourcePlatform: updatedLead.source_platform,
-        name: updatedLead.name,
-        email: updatedLead.email,
-        phone: updatedLead.phone,
-        company: updatedLead.company,
-        jobTitle: updatedLead.job_title,
-        status: updatedLead.status,
-        createdAt: updatedLead.created_at.toISOString(),
-        emails: updatedLead.leadEmails.map((leadEmail) => ({
-          subject: leadEmail.subject,
-          body: leadEmail.body,
-          hasAttachments: leadEmail.hasAttachments,
-          receivedDateTime: leadEmail.receivedDateTime.toISOString(),
-          emailId: leadEmail.emailId,
-          senderName: leadEmail.senderName,
-          senderEmail: leadEmail.senderEmail,
-          attachments: leadEmail.attachments.map((att) => ({
-            id: att.id,
-            fileName: att.fileName,
-            cloudinaryUrl: att.cloudinaryUrl,
-          })),
-        })),
+        updatedLead,
       };
     } catch (error) {
       this.logger.error(`Error updating lead ${leadId}: ${error.message}`);
-      throw new HttpException('Failed to update lead', HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException(
+        'Failed to update lead',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
+
+
+  
+  
+
+
 }
