@@ -8,6 +8,10 @@ generator client {
   provider = "prisma-client-js"
 }
 
+generator erd {
+  provider = "prisma-erd-generator"
+}
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -25,18 +29,20 @@ enum Status {
 }
 
 model Organization {
-  id            String                @id @default("single-org")
-  name          String
-  tenantId      String?
-  sharedMailbox String?
-  users         User[]
-  leads         Lead[]
-  platforms     MarketingPlatform[]
-  preferences   MicrosoftPreferences?
-  leadConfig    LeadConfiguration?    @relation("OrgToLeadConfig")
-  linkedInPage  LinkedInPage?         @relation("OrgToLinkedInPage")
-  created_at    DateTime              @default(now())
-  updated_at    DateTime              @updatedAt
+  id               String                @id @default("single-org")
+  name             String
+  tenantId         String?
+  sharedMailbox    String?
+  microsoftEntraCreds Json?
+  users            User[]
+  leads            Lead[]
+  platforms        MarketingPlatform[]
+  preferences      MicrosoftPreferences?
+  leadConfig       LeadConfiguration?    @relation("OrgToLeadConfig")
+  emailTemplates   EmailTemplate[]
+  AutoReplyConfigs AutoReplyConfig[]
+  created_at       DateTime              @default(now())
+  updated_at       DateTime              @updatedAt
 
   @@unique([id])
 }
@@ -174,52 +180,100 @@ enum LeadStatus {
 }
 
 model Lead {
-  lead_id         String       @id @default(uuid())
-  orgId           String       @default("single-org")
-  organization    Organization @relation(fields: [orgId], references: [id])
-  assignedToId    String?
-  assignedTo      User?        @relation("AssignedTo", fields: [assignedToId], references: [user_id])
-  source_platform String
-  campaignId      String?
-  campaign        Campaign?    @relation(fields: [campaignId], references: [id])
-  name            String
-  email           String
-  phone           String?
-  company         String?
-  job_title       String?
-  leadEmails      LeadEmail[]  @relation("LeadToEmail")
-  status          LeadStatus
-  created_at      DateTime     @default(now())
-  updated_at      DateTime     @updatedAt
+  lead_id               String             @id @default(uuid())
+  orgId                 String             @default("single-org")
+  organization          Organization       @relation(fields: [orgId], references: [id])
+  assignedToId          String?
+  assignedTo            User?              @relation("AssignedTo", fields: [assignedToId], references: [user_id])
+  source                String             @default("email")
+  campaignId            String?
+  campaign              Campaign?          @relation(fields: [campaignId], references: [id])
+  name                  String
+  email                 String
+  phone                 String?
+  company               String?
+  job_title             String?
+  initialConversationId String?
+  conversations         LeadConversation[]
+  status                LeadStatus
+  created_at            DateTime           @default(now())
+  updated_at            DateTime           @updatedAt
 
-  @@unique([orgId, email, source_platform], name: "org_id_email_source_platform_unique")
+  @@unique([orgId, email, initialConversationId], name: "org_id_email_initialConversationId_unique")
   @@index([orgId])
-  @@index([source_platform])
 }
 
 model LeadAttachment {
-  id            String    @id @default(uuid())
-  leadEmailId   String
-  fileName      String
-  cloudinaryUrl String
-  createdAt     DateTime  @default(now())
-  leadEmail     LeadEmail @relation(fields: [leadEmailId], references: [id], onDelete: Cascade)
+  id                  String            @id @default(uuid())
+  conversationEmailId String
+  fileName            String
+  cloudinaryUrl       String
+  createdAt           DateTime          @default(now())
+  leadEmail           ConversationEmail @relation(fields: [conversationEmailId], references: [id], onDelete: Cascade)
 }
 
-model LeadEmail {
+model LeadConversation {
+  id             String              @id @default(uuid())
+  lead           Lead                @relation(fields: [leadId], references: [lead_id])
+  leadId         String
+  conversationId String
+  emails         ConversationEmail[]
+  created_at     DateTime            @default(now())
+  updated_at     DateTime            @updatedAt
+}
+
+model ConversationEmail {
   id               String           @id @default(uuid())
-  leadId           String
-  lead             Lead             @relation("LeadToEmail", fields: [leadId], references: [lead_id], onDelete: Cascade)
+  conversation     LeadConversation @relation(fields: [conversationId], references: [id])
+  conversationId   String
+  emailId          String           @unique
   subject          String
   body             String           @db.Text
+  contentType      String
+  from             Json
+  to               Json
+  cc               Json
+  bcc              Json
   hasAttachments   Boolean
   receivedDateTime DateTime
-  emailId          String           @unique
-  senderName       String?
-  senderEmail      String
+  isIncoming       Boolean
+  isThreadHead     Boolean          @default(false)
+  inReplyTo        String?
   attachments      LeadAttachment[]
+  created_at       DateTime         @default(now())
+}
 
-  @@index([leadId])
+model EmailTemplate {
+  id               String            @id @default(uuid())
+  orgId            String
+  name             String
+  subject          String
+  body             String
+  isActive         Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  organization     Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  autoReplyConfigs AutoReplyConfig[] @relation("TemplateToAutoReplyConfig")
+
+  @@index([orgId])
+}
+
+model AutoReplyConfig {
+  id              String        @id @default(uuid())
+  orgId           String
+  organization    Organization  @relation(fields: [orgId], references: [id])
+  name            String
+  description     String?
+  triggerType     String
+  triggerValue    String?
+  templateId      String
+  template        EmailTemplate @relation("TemplateToAutoReplyConfig", fields: [templateId], references: [id])
+  mailbox         Boolean       @default(false)
+  schedule        String?
+  isActive        Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  emailTemplateId String?
 }
 
 model SyncState {

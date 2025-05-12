@@ -154,6 +154,26 @@ export class AuthController {
 
   ///////////////////////// MICROSOFT ////////////////////////
 
+  @UseGuards(JwtAuthGuard)
+  @Post('entra-credentials')
+  async saveEntraCredentials(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: { clientId: string; clientSecret: string; tenantId: string },
+  ) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    const userId = user.user_id;
+    return this.authService.saveMicrosoftEntraCredentials(userId, body);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('test-entra-connection')
+  async testEntraConnection(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    const userId = user.user_id;
+
+    return this.authService.testMicrosoftEntraConnection(userId);
+  }
+
   @Get('microsoft')
   @UseGuards(AuthGuard('microsoft'))
   async microsoftLogin() {}
@@ -161,7 +181,13 @@ export class AuthController {
   @Get('microsoft/callback')
   @UseGuards(AuthGuard('microsoft'))
   async microsoftLoginCallback(@Req() req, @Res() res: Response) {
+    console.log('Microsoft callback triggered, req.user:', req.user);
+    if (!req.user || !req.user.user || !req.user.tokens) {
+      console.error('Invalid req.user data:', req.user);
+      return res.redirect('http://localhost:3000/signin?error=microsoft');
+    }
     const { user, tokens } = req.user;
+    console.log('Setting cookies for user:', user, 'tokens:', tokens);
     res.cookie('accessToken', tokens.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -176,7 +202,9 @@ export class AuthController {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    res.redirect('http://localhost:3000/signin?callback=microsoft');
+    const redirectUrl = 'http://localhost:3000/signin?callback=microsoft';
+    console.log('Redirecting to:', redirectUrl);
+    res.redirect(redirectUrl);
   }
 
   @Get('microsoft/leads')
@@ -193,6 +221,12 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Redirect()
   async connectMicrosoft(@Req() req: AuthenticatedRequest) {
+    const user = req.user as {
+      user_id: string;
+      email: string;
+      orgId: string;
+      role: string;
+    };
     const user = req.user as {
       user_id: string;
       email: string;
@@ -227,49 +261,6 @@ export class AuthController {
     return {
       signInMethod: preferences?.signInMethod ?? true,
       leadSyncEnabled: preferences?.leadSyncEnabled ?? false,
-      linkedinAuthEnabled: preferences?.linkedinEnabled ?? false,
     };
-  }
-
-  ///////////////////////// LINKEDIN ////////////////////////
-  @Post('linkedin/page/connect')
-  @UseGuards(JwtAuthGuard)
-  async connectLinkedInPage(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string; orgId: string };
-    return this.authService.connectLinkedInPage(user.user_id);
-  }
-
-  @Post('linkedin/connect')
-  @UseGuards(JwtAuthGuard)
-  async connectLinkedInUser(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string; orgId: string };
-    return this.authService.connectLinkedInUser(user.user_id);
-  }
-
-  @Get('linkedin')
-  @UseGuards(AuthGuard('linkedin'))
-  async linkedInLogin() {
-    // No session needed; state is passed via OAuth state parameter
-  }
-
-  @Get('linkedin/callback')
-  @UseGuards(AuthGuard('linkedin'))
-  async linkedInAuthRedirect(@Req() req, @Res() res: Response) {
-    const { linkedinId, email, userId, isOrgPage } = req.user;
-    res.redirect('http://localhost:3000/settings');
-  }
-
-  @Post('linkedin/page/disconnect')
-  @UseGuards(JwtAuthGuard)
-  async disconnectLinkedInPage(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string; orgId: string };
-    return this.authService.disconnectLinkedInPage(user.user_id);
-  }
-
-  @Post('linkedin/disconnect')
-  @UseGuards(JwtAuthGuard)
-  async disconnectLinkedInUser(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string; orgId: string };
-    return this.authService.disconnectLinkedInUser(user.user_id);
   }
 }

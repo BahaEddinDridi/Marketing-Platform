@@ -6,8 +6,12 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { MicrosoftLeadsStrategy } from 'src/strategies/microsoft-leads.strategy';
 import { OrganizationModule } from 'src/organization/organization.module';
+import { MicrosoftAuthConfigService } from 'src/strategies/microsoft-auth-config.service';
+import { ConfigService } from '@nestjs/config';
 import { MicrosoftStrategy } from 'src/strategies/microsoft.strategy';
-import { LinkedInStrategy } from 'src/strategies/linkedin.strategy';
+import { PrismaService } from 'src/prisma/prisma.service';
+import { MicrosoftStrategyProvider } from 'src/middlewares/microsoft-strategy.provider';
+import { MicrosoftLeadsStrategyProvider } from 'src/middlewares/microsoft-leads-strategy.provider';
 
 @Module({
   imports: [
@@ -17,10 +21,21 @@ import { LinkedInStrategy } from 'src/strategies/linkedin.strategy';
       secret: process.env.JWT_SECRET,
       signOptions: { expiresIn: '1h' },
     }),
-    OrganizationModule
+    OrganizationModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, MicrosoftLeadsStrategy, MicrosoftStrategy, LinkedInStrategy],
-  exports: [AuthService, MicrosoftLeadsStrategy],
+  providers: [
+    AuthService,
+    MicrosoftAuthConfigService,
+    ConfigService,
+    MicrosoftStrategyProvider,
+    MicrosoftLeadsStrategyProvider,
+  ],
+  exports: [
+    AuthService,
+    MicrosoftAuthConfigService,
+    'MICROSOFT_STRATEGY',
+    'MICROSOFT_LEADS_STRATEGY',
+  ],
 })
 export class AuthModule {}

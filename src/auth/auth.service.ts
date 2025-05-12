@@ -1,6 +1,7 @@
 import {
   ForbiddenException,
   Injectable,
+  InternalServerErrorException,
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -19,9 +20,9 @@ interface MicrosoftTokenResponse {
   expires_in: number;
 }
 
-interface LinkedInTokenResponse {
+interface MicrosoftTestTokenResponse {
   access_token: string;
-  refresh_token?: string;
+  token_type: string;
   expires_in: number;
   scope: string;
 }
@@ -215,6 +216,99 @@ export class AuthService {
 
   /////////////////////////// MICROSOFT ///////////////////////////////////
 
+
+  async saveMicrosoftEntraCredentials(
+    userId: string,
+    creds: { clientId: string; clientSecret: string; tenantId: string },
+  ) {
+    const user = await this.prisma.user.findUnique({ where: { user_id: userId } });
+    if (!user) throw new UnauthorizedException('User not found');
+    if (user.role !== 'ADMIN') throw new ForbiddenException('Only admins can save Entra credentials');
+  
+    await this.prisma.organization.update({
+      where: { id: 'single-org' },
+      data: {
+        microsoftEntraCreds: {
+          clientId: creds.clientId,
+          clientSecret: creds.clientSecret,
+          tenantId: creds.tenantId,
+        },
+      },
+    });
+  
+    this.logger.log(`Saved Microsoft Entra credentials for org single-org`);
+    return { message: 'Entra credentials saved successfully' };
+  }
+  
+  async testMicrosoftEntraConnection(userId: string) {
+    const user = await this.prisma.user.findUnique({ where: { user_id: userId } });
+    if (!user) throw new UnauthorizedException('User not found');
+    if (user.role !== 'ADMIN') throw new ForbiddenException('Only admins can test Entra credentials');
+  
+    const org = await this.prisma.organization.findUnique({
+      where: { id: 'single-org' },
+      select: { microsoftEntraCreds: true },
+    });
+    if (!org || !org.microsoftEntraCreds) {
+      throw new Error('No Entra credentials found');
+    }
+  
+    const { clientId, clientSecret, tenantId } = org.microsoftEntraCreds as any;
+    this.logger.log(`Testing Entra connection for org single-org with clientId: ${clientId}, tenantId: ${tenantId}`);
+  
+    try {
+      const response = await axios.post<MicrosoftTestTokenResponse>(
+        `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+        new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          grant_type: 'client_credentials',
+          scope: 'https://graph.microsoft.com/.default',
+        }).toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
+      );
+  
+      const { access_token } = response.data;
+      this.logger.log(`Entra connection test successful for org single-org: Token acquired`);
+  
+      return { message: 'Connection successful: Valid credentials confirmed' };
+    } catch (error: any) {
+      if (error.response) {
+        const { status, data } = error.response;
+        this.logger.error(`Entra connection test failed: HTTP ${status} - ${JSON.stringify(data)}`);
+        if (status === 401) {
+          throw new Error('Invalid credentials: Check Client ID, Client Secret, or Tenant ID.');
+        }
+      }
+      this.logger.error(`Entra connection test failed: ${error.message}`);
+      throw new Error('Failed to test Entra connection');
+    }
+  }
+
+  async getEntraCredentials() {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: 'single-org' },
+      select: { microsoftEntraCreds: true },
+    });
+
+    if (!org || !org.microsoftEntraCreds) {
+      throw new InternalServerErrorException('Microsoft Entra credentials not found in database');
+    }
+
+    const { clientId, clientSecret, tenantId } = org.microsoftEntraCreds as {
+      clientId: string;
+      clientSecret: string;
+      tenantId: string;
+    };
+
+    if (!clientId || !clientSecret || !tenantId) {
+      throw new InternalServerErrorException('Invalid Microsoft Entra credentials in database');
+    }
+
+    return { clientId, clientSecret, tenantId };
+  }
+
+
   async validateMicrosoftUser(
     microsoftId: string,
     email: string,
@@ -352,7 +446,7 @@ export class AuthService {
         user.role,
       );
       await this.saveRefreshToken(user.user_id, tokens.refreshToken);
-
+console.log(`Microsoft user validated: ${user.email}, tokens generated`);
       this.logger.log(`Microsoft user validated: ${user.email}`);
       return { user, tokens };
     } catch (error) {
@@ -451,8 +545,8 @@ export class AuthService {
       throw new Error('No valid refresh token');
 
     try {
-      const clientId = this.configService.get('MICROSOFT_CLIENT_ID');
-      const clientSecret = this.configService.get('MICROSOFT_CLIENT_SECRET');
+
+      const { clientId, clientSecret, tenantId } = await this.getEntraCredentials();
 
       if (!clientId || !clientSecret) {
         throw new Error('Missing Microsoft OAuth configuration');
@@ -525,8 +619,6 @@ export class AuthService {
     this.logger.log(
       `Updating Microsoft credentials for org (email: ${email}, type: ${type})`,
     );
-
-    // Find the organization
     const org = await this.prisma.organization.findUnique({
       where: { id: 'single-org' },
     });
@@ -534,8 +626,7 @@ export class AuthService {
       this.logger.error(`Organization not found for id: single-org`);
       throw new Error('Organization not found');
     }
-
-    // Fetch tenantId by decoding the access token
+  
     let tenantId: string | null = null;
     try {
       tenantId = await this.getTenantIdFromToken(accessToken);

@@ -13,9 +13,11 @@ import {
   Put,
   HttpException,
   HttpStatus,
+  Query,
 } from '@nestjs/common';
 import { LeadService } from './lead.service';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
+import { LeadStatus } from '@prisma/client';
 
 interface AuthenticatedRequest extends Request {
   user?: { user_id: string; email: string; orgId: string; role: string };
@@ -30,7 +32,6 @@ export class LeadController {
     return this.leadService.findAll();
   }
 
-
   @Get('fetch')
   @UseGuards(JwtAuthGuard)
   async fetchEmails(@Req() req: AuthenticatedRequest) {
@@ -40,9 +41,65 @@ export class LeadController {
 
   @Get('getByUserId')
   @UseGuards(JwtAuthGuard)
-  async getByUserId(@Req() req: AuthenticatedRequest) {
+  async getByUserId(
+    @Req() req: AuthenticatedRequest,
+    @Query('page') page: string,
+    @Query('pageSize') pageSize: string,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+    @Query('source') source?: string,
+  ) {
     const user = req.user as { user_id: string; email: string; orgId: string };
-    return this.leadService.fetchLeadsByUserId(user.orgId, user.user_id);
+    console.log('Received query params:', {
+      page,
+      pageSize,
+      search,
+      status,
+      source,
+    });
+    let validatedStatuses: LeadStatus[] | undefined;
+    if (status) {
+      const statusArray = status.split(',').map((s) => s.trim());
+      const validStatuses = Object.values(LeadStatus); // [NEW, CONTACTED, IN_PROGRESS, CONVERTED, CLOSED]
+      validatedStatuses = statusArray.filter((s) =>
+        validStatuses.includes(s as LeadStatus),
+      ) as LeadStatus[]; // Explicit cast to LeadStatus[]
+      if (validatedStatuses.length === 0) {
+        throw new HttpException(
+          'Invalid status values',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    }
+
+    // Parse source array
+    let validatedSources: string[] | undefined;
+    if (source) {
+      validatedSources = source.split(',').map((s) => s.trim());
+      const validSources = ['email', 'web', 'manual']; // Adjust based on schema
+      validatedSources = validatedSources.filter((s) =>
+        validSources.includes(s),
+      );
+      if (validatedSources.length === 0) {
+        throw new HttpException(
+          'Invalid source values',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    }
+    return this.leadService.fetchLeadsByUserId(
+      user.orgId,
+      user.user_id,
+      parseInt(page) || 1,
+      parseInt(pageSize) || 10,
+      { search, status: validatedStatuses, source: validatedSources },
+    );
+  }
+
+  @Get('conversation/:leadId')
+  @UseGuards(JwtAuthGuard)
+  async getLeadConversation(@Param('leadId') leadId: string) {
+    return this.leadService.fetchLeadConversation(leadId);
   }
 
   @Post('update-status')
@@ -89,7 +146,13 @@ export class LeadController {
   @UseGuards(JwtAuthGuard)
   async setupLeadSync(
     @Req() req: AuthenticatedRequest,
-    @Body() data: { sharedMailbox: string; filters?: string[]; folders?: Record<string, string>; syncInterval?: string },
+    @Body()
+    data: {
+      sharedMailbox: string;
+      filters?: string[];
+      folders?: Record<string, string>;
+      syncInterval?: string;
+    },
   ) {
     const user = req.user as { user_id: string; orgId: string };
     return this.leadService.setupLeadSync(user.orgId, user.user_id, data);
@@ -122,8 +185,7 @@ export class LeadController {
     const user = req.user as { user_id: string; orgId: string };
     return this.leadService.disconnectMemberLeadSync(user.user_id);
   }
-  
-  
+
   @Get(':id')
   @UseGuards(JwtAuthGuard)
   findOne(@Param('id') id: string) {
