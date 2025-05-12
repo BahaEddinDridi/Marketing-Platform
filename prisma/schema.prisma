@@ -33,6 +33,7 @@ model Organization {
   name             String
   tenantId         String?
   sharedMailbox    String?
+  microsoftEntraCreds Json?
   users            User[]
   leads            Lead[]
   platforms        MarketingPlatform[]
@@ -238,13 +239,15 @@ model AutoReplyConfig {
   id              String        @id @default(uuid())
   orgId           String
   organization    Organization  @relation(fields: [orgId], references: [id])
+  name            String
+  description     String?
   triggerType     String
   triggerValue    String?
   templateId      String
   template        EmailTemplate @relation("TemplateToAutoReplyConfig", fields: [templateId], references: [id])
-  mailbox         String?
+  mailbox         Boolean       @default(false)
   schedule        String?
-  isActive        Boolean       @default(true)
+  isActive        Boolean       @default(false)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   emailTemplateId String?

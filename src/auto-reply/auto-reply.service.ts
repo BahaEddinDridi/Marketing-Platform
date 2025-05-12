@@ -115,14 +115,24 @@ export class AutoReplyService {
   ): Promise<void> {
     try {
       if (!originalMessageId) {
-        this.logger.error(`No valid originalMessageId for lead ${lead.lead_id}`);
-        throw new HttpException('Invalid original message ID', HttpStatus.BAD_REQUEST);
+        this.logger.error(
+          `No valid originalMessageId for lead ${lead.lead_id}`,
+        );
+        throw new HttpException(
+          'Invalid original message ID',
+          HttpStatus.BAD_REQUEST,
+        );
       }
       if (!conversationId) {
         this.logger.error(`No valid conversationId for lead ${lead.lead_id}`);
-        throw new HttpException('Invalid conversation ID', HttpStatus.BAD_REQUEST);
+        throw new HttpException(
+          'Invalid conversation ID',
+          HttpStatus.BAD_REQUEST,
+        );
       }
-      this.logger.log(`Sending reply to message ID ${originalMessageId} for ${lead.email}`);
+      this.logger.log(
+        `Sending reply to message ID ${originalMessageId} for ${lead.email}`,
+      );
       const { body } = this.personalizeTemplate(template, lead);
       const response = await axios.post(
         `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${originalMessageId}/reply`,
@@ -142,7 +152,11 @@ export class AutoReplyService {
       );
       this.logger.log(
         `Auto-reply sent as reply to ${lead.email} for lead ${lead.lead_id}`,
-        JSON.stringify({ status: response.status, data: response.data }, null, 2),
+        JSON.stringify(
+          { status: response.status, data: response.data },
+          null,
+          2,
+        ),
       );
     } catch (error) {
       this.logger.error(
@@ -172,7 +186,11 @@ export class AutoReplyService {
         );
         this.logger.log(
           `Fallback auto-reply sent to ${lead.email} for lead ${lead.lead_id}`,
-          JSON.stringify({ status: fallbackResponse.status, data: fallbackResponse.data }, null, 2),
+          JSON.stringify(
+            { status: fallbackResponse.status, data: fallbackResponse.data },
+            null,
+            2,
+          ),
         );
       } catch (fallbackError) {
         this.logger.error(
@@ -193,7 +211,10 @@ export class AutoReplyService {
     try {
       const config = await this.prisma.autoReplyConfig.findUnique({
         where: { id: configId },
-        include: { template: true },
+        include: {
+          template: true,
+          organization: { select: { sharedMailbox: true } },
+        },
       });
       this.logger.log(`Auto-reply config: ${JSON.stringify(config)}`);
       if (!config || !config.isActive) {
@@ -247,6 +268,9 @@ export class AutoReplyService {
               },
             },
           },
+          assignedTo: {
+            select: { email: true },
+          },
         },
       });
 
@@ -271,12 +295,31 @@ export class AutoReplyService {
           continue;
         }
 
+        let mailbox: string | null = null;
+        if (config.mailbox) {
+          mailbox = lead.assignedTo?.email || null;
+          if (!mailbox) {
+            this.logger.warn(
+              `No assigned user email for lead ${lead.lead_id}, skipping auto-reply`,
+            );
+            continue;
+          }
+        } else {
+          mailbox = config.organization.sharedMailbox;
+          if (!mailbox) {
+            this.logger.warn(
+              `No shared mailbox configured for org ${orgId}, skipping auto-reply`,
+            );
+            continue;
+          }
+        }
+
         try {
           await this.sendAutoReply(
             orgId,
             lead,
             config.template,
-            config.mailbox!,
+            mailbox,
             conversation.conversationId,
             conversation.emails[0].emailId || '',
             token,
@@ -344,7 +387,7 @@ export class AutoReplyService {
   ) {
     const config = await this.prisma.autoReplyConfig.findUnique({
       where: { id: configId },
-      select: { isActive: true },
+      select: { isActive: true, schedule: true },
     });
 
     if (!config?.isActive) {
@@ -395,16 +438,17 @@ export class AutoReplyService {
   async createConfig(
     orgId: string,
     userId: string,
+    name: string,
+    description: string | null,
+    triggerType: string,
     templateId: string,
-    mailbox: string,
+    mailbox: boolean,
     schedule: string,
   ) {
+    // Check user role
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
-    if (!user || user.role !== 'ADMIN') {
-      throw new ForbiddenException('Only admins can create auto-reply configs');
-    }
 
     const template = await this.prisma.emailTemplate.findUnique({
       where: { id: templateId },
@@ -416,17 +460,7 @@ export class AutoReplyService {
       );
     }
 
-    const org = await this.prisma.organization.findUnique({
-      where: { id: orgId },
-      select: { sharedMailbox: true },
-    });
-    if (!org || org.sharedMailbox !== mailbox) {
-      throw new HttpException(
-        'Invalid mailbox for organization',
-        HttpStatus.BAD_REQUEST,
-      );
-    }
-
+    // Validate schedule
     if (!Object.keys(this.cronMap).includes(schedule)) {
       throw new HttpException(
         'Invalid schedule interval',
@@ -434,45 +468,41 @@ export class AutoReplyService {
       );
     }
 
-    const existingConfig = await this.prisma.autoReplyConfig.findFirst({
-      where: { orgId, triggerType: 'NEW_LEAD_ONE_EMAIL' },
-    });
-
-    if (existingConfig) {
-      throw new HttpException(
-        'Auto-reply config for NEW_LEAD_ONE_EMAIL already exists',
-        HttpStatus.CONFLICT,
-      );
-    }
-
+    // Create config
     const config = await this.prisma.autoReplyConfig.create({
       data: {
         orgId,
-        triggerType: 'NEW_LEAD_ONE_EMAIL',
+        name,
+        description,
+        triggerType,
         triggerValue: null,
         templateId,
         mailbox,
         schedule,
-        isActive: true,
+        isActive: false,
       },
       include: { template: true },
     });
 
+    // Schedule auto-reply task
     await this.scheduleAutoReply(orgId, config.id, schedule);
-    this.logger.log(`Auto-reply config created for org ${orgId}`);
+    this.logger.log(`Auto-reply config created for org ${orgId}: ${name}`);
     return config;
   }
 
-  // Update auto-reply config
   async updateConfig(
     orgId: string,
     userId: string,
     configId: string,
+    name?: string,
+    description?: string | null,
+    triggerType?: string,
     templateId?: string,
-    mailbox?: string,
+    mailbox?: boolean,
     schedule?: string,
     isActive?: boolean,
   ) {
+    // Check user role
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
@@ -480,6 +510,7 @@ export class AutoReplyService {
       throw new ForbiddenException('Only admins can update auto-reply configs');
     }
 
+    // Validate config
     const config = await this.prisma.autoReplyConfig.findUnique({
       where: { id: configId },
       select: { orgId: true },
@@ -491,6 +522,7 @@ export class AutoReplyService {
       );
     }
 
+    // Validate template if provided
     if (templateId) {
       const template = await this.prisma.emailTemplate.findUnique({
         where: { id: templateId },
@@ -503,19 +535,7 @@ export class AutoReplyService {
       }
     }
 
-    if (mailbox) {
-      const org = await this.prisma.organization.findUnique({
-        where: { id: orgId },
-        select: { sharedMailbox: true },
-      });
-      if (!org || org.sharedMailbox !== mailbox) {
-        throw new HttpException(
-          'Invalid mailbox for organization',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-    }
-
+    // Validate schedule if provided
     if (schedule && !Object.keys(this.cronMap).includes(schedule)) {
       throw new HttpException(
         'Invalid schedule interval',
@@ -523,17 +543,22 @@ export class AutoReplyService {
       );
     }
 
+    // Update config
     const updatedConfig = await this.prisma.autoReplyConfig.update({
       where: { id: configId },
       data: {
+        name,
+        description,
+        triggerType,
         templateId,
-        mailbox,
+        mailbox, // Boolean: true for shared, false for user
         schedule,
         isActive,
       },
       include: { template: true },
     });
 
+    // Reschedule if schedule or isActive changed
     if (schedule || isActive !== undefined) {
       await this.scheduleAutoReply(
         orgId,
@@ -546,7 +571,6 @@ export class AutoReplyService {
     return updatedConfig;
   }
 
-  // Delete auto-reply config
   async deleteConfig(orgId: string, userId: string, configId: string) {
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },

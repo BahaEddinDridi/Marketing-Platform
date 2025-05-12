@@ -1,27 +1,34 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { Strategy, Profile } from 'passport-microsoft';
-import { ConfigService } from '@nestjs/config';
 import { AuthService } from 'src/auth/auth.service';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { MicrosoftOAuthConfig } from './microsoft-auth-config.service';
 
 @Injectable()
 export class MicrosoftStrategy extends PassportStrategy(Strategy, 'microsoft') {
   constructor(
     private readonly authService: AuthService,
-    private readonly configService: ConfigService,
+    private readonly config: MicrosoftOAuthConfig,
     private readonly prisma: PrismaService,
   ) {
     super({
-      clientID: configService.get('MICROSOFT_CLIENT_ID'),
-      clientSecret: configService.get('MICROSOFT_CLIENT_SECRET'),
-      callbackURL: configService.get('MICROSOFT_REDIRECT_URI'),
+      clientID: config.clientID,
+      clientSecret: config.clientSecret,
+      callbackURL: 'http://localhost:5000/auth/microsoft/callback',
       scope: ['openid', 'profile', 'email', 'User.Read', 'offline_access'],
-      tenant: 'common',
+      tenant: config.tenantID || 'common',
+      authorizationURL: `https://login.microsoftonline.com/${config.tenantID}/oauth2/v2.0/authorize`,
+      tokenURL: `https://login.microsoftonline.com/${config.tenantID}/oauth2/v2.0/token`,
     });
   }
 
-  async validate(accessToken: string, refreshToken: string, profile: Profile, done: Function) {
+  async validate(
+    accessToken: string,
+    refreshToken: string,
+    profile: Profile,
+    done: Function,
+  ) {
     const { id, displayName, emails, _json } = profile;
     const email = emails?.[0]?.value || _json.mail;
     if (!email) return done(new Error('No email found'), null);
@@ -31,7 +38,13 @@ export class MicrosoftStrategy extends PassportStrategy(Strategy, 'microsoft') {
     const jobTitle = _json.jobTitle || '';
     const phoneNumber = _json.mobilePhone || '';
     const expiresIn = _json.expires_in || 3600;
-    const scopes = ['openid', 'profile', 'email', 'User.Read', 'offline_access'];
+    const scopes = [
+      'openid',
+      'profile',
+      'email',
+      'User.Read',
+      'offline_access',
+    ];
 
     const org = await this.prisma.organization.findUnique({
       where: { id: 'single-org' },
@@ -41,18 +54,30 @@ export class MicrosoftStrategy extends PassportStrategy(Strategy, 'microsoft') {
       const preferences = await this.prisma.microsoftPreferences.findUnique({
         where: { orgId: 'single-org' },
       });
+      console.log(
+        `Microsoft sign-in preferences for organization: ${JSON.stringify(preferences)}`,
+      );
       if (!preferences?.signInMethod) {
-        const user = await this.prisma.user.findUnique({ where: { microsoftId: id } });
+        const user = await this.prisma.user.findUnique({
+          where: { microsoftId: id },
+        });
         if (!user || user.role !== 'ADMIN') {
-          console.log(`Microsoft sign-in disabled for non-admin user: ${email}`);
-          return done(new UnauthorizedException('Microsoft Sign-in Method is disabled'), null);
+          console.log(
+            `Microsoft sign-in disabled for non-admin user: ${email}`,
+          );
+          return done(
+            new UnauthorizedException('Microsoft Sign-in Method is disabled'),
+            null,
+          );
         }
       }
     } else {
       // No organization exists, allow sign-in to create it
-      console.log(`No organization found, allowing first Microsoft sign-in for ${email}`);
+      console.log(
+        `No organization found, allowing first Microsoft sign-in for ${email}`,
+      );
     }
-    
+
     try {
       const userData = await this.authService.validateMicrosoftUser(
         id,
@@ -66,8 +91,10 @@ export class MicrosoftStrategy extends PassportStrategy(Strategy, 'microsoft') {
         expiresIn,
         scopes,
       );
+      console.log("MicrosoftStrategy validate success:", userData);
       return done(null, userData);
     } catch (error) {
+      console.error("MicrosoftStrategy validate error:", error.message, error.stack);
       return done(error, null);
     }
   }

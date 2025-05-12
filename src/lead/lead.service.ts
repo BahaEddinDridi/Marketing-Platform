@@ -13,7 +13,7 @@ import axios from 'axios';
 import * as schedule from 'node-schedule';
 import { v2 as cloudinary } from 'cloudinary';
 import { Readable } from 'stream';
-import { LeadStatus } from '@prisma/client';
+import { LeadStatus, Prisma } from '@prisma/client';
 
 interface GraphEmailResponse {
   value: {
@@ -68,7 +68,6 @@ interface EmailTemplate {
   body: string;
   isActive: boolean;
 }
-
 
 @Injectable()
 export class LeadService {
@@ -320,7 +319,7 @@ export class LeadService {
           return email;
         } catch (error) {
           this.logger.error(`Failed to fetch email ${id}: ${error.message}`);
-          return undefined; 
+          return undefined;
         }
       });
 
@@ -1189,26 +1188,82 @@ export class LeadService {
     this.jobs.set(orgId, job);
   }
 
-  async fetchLeadsByUserId(orgId: string, userId: string) {
-    this.logger.log(`Fetching leads for userId: ${userId}, orgId: ${orgId}`);
+  async fetchLeadsByUserId(
+  orgId: string,
+  userId: string,
+  page: number = 1,
+  pageSize: number = 10,
+  filters: {
+    search?: string;
+    status?: LeadStatus[]; // Use LeadStatus[]
+    source?: string[]; // Assuming source is a String field
+  } = {},
+) {
+  this.logger.log(
+    `Fetching leads for userId: ${userId}, orgId: ${orgId}, page: ${page}, pageSize: ${pageSize}, filters: ${JSON.stringify(filters)}`,
+  );
 
-    try {
-      const user = await this.prisma.user.findUnique({
-        where: { user_id: userId },
-        select: { role: true },
-      });
-      if (!user)
-        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+  try {
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+      select: { role: true },
+    });
+    if (!user)
+      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
 
-      const whereClause =
-        user.role === 'ADMIN'
-          ? { orgId }
-          : {
-              orgId,
-              OR: [{ assignedToId: userId }, { assignedToId: null }],
-            };
+    // Base where clause based on user role
+    const baseWhereClause: Prisma.LeadWhereInput =
+      user.role === 'ADMIN'
+        ? { orgId }
+        : {
+            orgId,
+            OR: [{ assignedToId: userId }, { assignedToId: null }],
+          };
 
-      const leads = await this.prisma.lead.findMany({
+    // Build search conditions for name, email, company, jobTitle
+    const searchConditions: Prisma.LeadWhereInput[] = [];
+    if (filters.search) {
+      const searchTerm = filters.search;
+      searchConditions.push(
+        {
+          name: {
+            contains: searchTerm,
+            mode: 'insensitive' as Prisma.QueryMode,
+          },
+        },
+        {
+          email: {
+            contains: searchTerm,
+            mode: 'insensitive' as Prisma.QueryMode,
+          },
+        },
+        {
+          company: {
+            contains: searchTerm,
+            mode: 'insensitive' as Prisma.QueryMode,
+          },
+        },
+        {
+          job_title: {
+            contains: searchTerm,
+            mode: 'insensitive' as Prisma.QueryMode,
+          },
+        },
+      );
+    }
+
+    // Extend where clause with filters
+    const whereClause: Prisma.LeadWhereInput = {
+      ...baseWhereClause,
+      ...(filters.search && { OR: searchConditions }),
+      ...(filters.status?.length && { status: { in: filters.status } }), // Compatible with LeadStatus[]
+      ...(filters.source?.length && { source: { in: filters.source } }), // Works for String field
+    };
+
+    const skip = (page - 1) * pageSize;
+
+    const [leads, total] = await Promise.all([
+      this.prisma.lead.findMany({
         where: whereClause,
         orderBy: { created_at: 'desc' },
         include: {
@@ -1221,33 +1276,42 @@ export class LeadService {
             },
           },
         },
-      });
+        skip,
+        take: pageSize,
+      }),
+      this.prisma.lead.count({ where: whereClause }),
+    ]);
 
-      this.logger.log(`Fetched ${leads.length} leads for userId: ${userId}`);
+    this.logger.log(`Fetched ${leads.length} leads for userId: ${userId}`);
 
-      return {
-        leads: leads.map((lead) => ({
-          leadId: lead.lead_id,
-          source: lead.source,
-          name: lead.name,
-          email: lead.email,
-          phone: lead.phone,
-          company: lead.company,
-          jobTitle: lead.job_title,
-          status: lead.status,
-          assignedTo: lead.assignedTo,
-          createdAt: lead.created_at,
-        })),
-      };
-    } catch (error) {
-      this.logger.error('Error fetching leads: ', error.message);
-      throw new HttpException(
-        'Failed to fetch leads',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
+    return {
+      leads: leads.map((lead) => ({
+        leadId: lead.lead_id,
+        source: lead.source,
+        name: lead.name,
+        email: lead.email,
+        phone: lead.phone,
+        company: lead.company,
+        jobTitle: lead.job_title,
+        status: lead.status,
+        assignedTo: lead.assignedTo,
+        createdAt: lead.created_at,
+      })),
+      pagination: {
+        currentPage: page,
+        pageSize,
+        totalItems: total,
+        totalPages: Math.ceil(total / pageSize),
+      },
+    };
+  } catch (error) {
+    this.logger.error('Error fetching leads: ', error.message);
+    throw new HttpException(
+      'Failed to fetch leads',
+      HttpStatus.INTERNAL_SERVER_ERROR,
+    );
   }
-
+}
   async fetchLeadConversation(leadId: string) {
     this.logger.log(`Fetching conversation for leadId: ${leadId}`);
 
@@ -1375,10 +1439,4 @@ export class LeadService {
       );
     }
   }
-
-
-  
-  
-
-
 }

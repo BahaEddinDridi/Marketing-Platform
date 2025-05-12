@@ -55,13 +55,21 @@ export class AutoReplyController {
   @Post('config')
   async create(
     @Req() req: AuthenticatedRequest,
-    @Body() body: { templateId: string; mailbox: string; schedule: string },
+    @Body() body: {name: string;
+      description?: string;
+      triggerType: string;
+      templateId: string;
+      mailbox: boolean;
+      schedule: string;},
   ) {
     const user = req.user as { user_id: string; email: string; orgId: string; role: string };
     try {
       return await this.autoReplyService.createConfig(
         user.orgId,
         user.user_id,
+        body.name,
+        body.description || null,
+        body.triggerType,
         body.templateId,
         body.mailbox,
         body.schedule,
@@ -78,7 +86,13 @@ export class AutoReplyController {
   async update(
     @Req() req: AuthenticatedRequest,
     @Param('id') id: string,
-    @Body() body: { templateId?: string; mailbox?: string; schedule?: string; isActive?: boolean },
+    @Body() body: { name?: string;
+      description?: string;
+      triggerType?: string;
+      templateId?: string;
+      mailbox?: boolean;
+      schedule?: string;
+      isActive?: boolean; },
   ) {
     const user = req.user as { user_id: string; email: string; orgId: string; role: string };
     try {
@@ -86,6 +100,9 @@ export class AutoReplyController {
         user.orgId,
         user.user_id,
         id,
+        body.name,
+        body.description,
+        body.triggerType,
         body.templateId,
         body.mailbox,
         body.schedule,

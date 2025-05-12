@@ -154,6 +154,26 @@ export class AuthController {
 
   ///////////////////////// MICROSOFT ////////////////////////
 
+  @UseGuards(JwtAuthGuard)
+  @Post('entra-credentials')
+  async saveEntraCredentials(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: { clientId: string; clientSecret: string; tenantId: string },
+  ) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    const userId = user.user_id;
+    return this.authService.saveMicrosoftEntraCredentials(userId, body);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('test-entra-connection')
+  async testEntraConnection(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    const userId = user.user_id;
+
+    return this.authService.testMicrosoftEntraConnection(userId);
+  }
+
   @Get('microsoft')
   @UseGuards(AuthGuard('microsoft'))
   async microsoftLogin() {}
@@ -161,7 +181,13 @@ export class AuthController {
   @Get('microsoft/callback')
   @UseGuards(AuthGuard('microsoft'))
   async microsoftLoginCallback(@Req() req, @Res() res: Response) {
+    console.log('Microsoft callback triggered, req.user:', req.user);
+    if (!req.user || !req.user.user || !req.user.tokens) {
+      console.error('Invalid req.user data:', req.user);
+      return res.redirect('http://localhost:3000/signin?error=microsoft');
+    }
     const { user, tokens } = req.user;
+    console.log('Setting cookies for user:', user, 'tokens:', tokens);
     res.cookie('accessToken', tokens.accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -176,7 +202,9 @@ export class AuthController {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    res.redirect('http://localhost:3000/signin?callback=microsoft');
+    const redirectUrl = 'http://localhost:3000/signin?callback=microsoft';
+    console.log('Redirecting to:', redirectUrl);
+    res.redirect(redirectUrl);
   }
 
   @Get('microsoft/leads')
@@ -193,7 +221,12 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Redirect()
   async connectMicrosoft(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string; orgId: string; role: string };
+    const user = req.user as {
+      user_id: string;
+      email: string;
+      orgId: string;
+      role: string;
+    };
     return this.authService.connectMicrosoft(user.user_id);
   }
 
@@ -201,9 +234,14 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   async disconnectMicrosoft(@Req() req: AuthenticatedRequest) {
     const user = req.user as { user_id: string; email: string; orgId: string };
-    const userRecord = await this.prisma.user.findUnique({ where: { user_id: user.user_id } });
+    const userRecord = await this.prisma.user.findUnique({
+      where: { user_id: user.user_id },
+    });
     if (!userRecord || userRecord.role !== 'ADMIN') {
-      throw new HttpException('Only admins can disconnect Microsoft', HttpStatus.FORBIDDEN);
+      throw new HttpException(
+        'Only admins can disconnect Microsoft',
+        HttpStatus.FORBIDDEN,
+      );
     }
 
     return this.authService.disconnectMicrosoft(user.user_id);
@@ -214,7 +252,9 @@ export class AuthController {
     const preferences = await this.prisma.microsoftPreferences.findUnique({
       where: { orgId: 'single-org' },
     });
-    console.log('Preferences:', preferences);
-    return { signInMethod: preferences?.signInMethod ?? true, leadSyncEnabled: preferences?.leadSyncEnabled ?? false, };
+    return {
+      signInMethod: preferences?.signInMethod ?? true,
+      leadSyncEnabled: preferences?.leadSyncEnabled ?? false,
+    };
   }
 }
