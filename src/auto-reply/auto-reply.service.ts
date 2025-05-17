@@ -12,6 +12,11 @@ import axios from 'axios';
 import * as schedule from 'node-schedule';
 import { LeadStatus } from '@prisma/client';
 
+interface GraphReplyDraft {
+  id: string;
+  conversationId: string;
+}
+
 interface EmailTemplate {
   id: string;
   orgId: string;
@@ -33,10 +38,10 @@ export class AutoReplyService {
   private autoReplyJobs = new Map<string, schedule.Job>();
   private readonly platformName = 'Microsoft';
   private readonly scopes = [
-    'mail.read',
-    'mail.send',
-    'user.read',
-    'offline_access',
+    'Mail.Read',
+    'Mail.Send',
+    'User.Read.All',
+    'Directory.Read.All',
   ];
 
   constructor(
@@ -58,11 +63,7 @@ export class AutoReplyService {
     });
 
     if (!platform) {
-      this.logger.error(`Microsoft platform not found for org ${orgId}`);
-      return {
-        needsAuth: true,
-        authUrl: 'http://localhost:5000/auth/microsoft/leads',
-      };
+      return { needsAuth: true };
     }
 
     const creds = await this.prisma.platformCredentials.findFirst({
@@ -74,14 +75,16 @@ export class AutoReplyService {
     });
 
     if (!creds) {
-      this.logger.error(`No LEADS credentials found for org ${orgId}`);
-      return {
-        needsAuth: true,
-        authUrl: 'http://localhost:5000/auth/microsoft/leads',
-      };
+      return { needsAuth: true };
     }
 
-    return { creds, needsAuth: false };
+    // Check if token is still valid
+    const isExpired = creds.expires_at && new Date(creds.expires_at) < new Date();
+    if (!isExpired && creds.access_token) {
+      return { creds, needsAuth: false };
+    }
+
+    return { creds, needsAuth: true };
   }
 
   // Personalize email template
@@ -202,6 +205,7 @@ export class AutoReplyService {
     }
   }
 
+
   // Process auto-replies for eligible leads
   async processAutoReplies(orgId: string, configId: string) {
     this.logger.log(
@@ -229,17 +233,17 @@ export class AutoReplyService {
 
       // Validate credentials
       const credResult = await this.getPlatformCredentials(orgId);
-      if (credResult.needsAuth) {
-        this.logger.warn(
-          `Org ${orgId} needs to re-authenticate for auto-reply`,
-        );
+      if (credResult.needsAuth && !credResult.creds?.access_token) {
+        this.logger.warn(`Org ${orgId} needs credentials for auto-reply`);
         return;
       }
 
-      const token = await this.authService.getMicrosoftToken(
-        orgId,
-        this.scopes,
-      );
+      let token: string;
+      if (!credResult.needsAuth && credResult.creds?.access_token) {
+        token = credResult.creds.access_token;
+      } else {
+        token = await this.authService.getMicrosoftAppToken(orgId);
+      }
 
       // Fetch leads with status NEW and exactly one incoming email
       const leads = await this.prisma.lead.findMany({

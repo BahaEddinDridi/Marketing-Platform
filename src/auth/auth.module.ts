@@ -12,6 +12,11 @@ import { MicrosoftStrategy } from 'src/strategies/microsoft.strategy';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { MicrosoftStrategyProvider } from 'src/middlewares/microsoft-strategy.provider';
 import { MicrosoftLeadsStrategyProvider } from 'src/middlewares/microsoft-leads-strategy.provider';
+import { LinkedInService } from './linkedIn/linkedIn.service';
+import { LinkedInController } from './linkedIn/linkedIn.controller';
+import { LinkedInAuthConfigService } from 'src/middlewares/linkedIn/linkedin-auth-config.service';
+import { LinkedInStrategyProvider } from 'src/middlewares/linkedIn/linkedin-strategy.provider';
+import { LinkedInPageStrategyProvider } from 'src/middlewares/linkedIn/linkedin-page-strategy.provider';
 
 @Module({
   imports: [
@@ -23,19 +28,24 @@ import { MicrosoftLeadsStrategyProvider } from 'src/middlewares/microsoft-leads-
     }),
     OrganizationModule,
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, LinkedInController],
   providers: [
     AuthService,
     MicrosoftAuthConfigService,
     ConfigService,
+    LinkedInService,
     MicrosoftStrategyProvider,
     MicrosoftLeadsStrategyProvider,
+    LinkedInStrategyProvider,
+    LinkedInPageStrategyProvider,
   ],
   exports: [
     AuthService,
     MicrosoftAuthConfigService,
     'MICROSOFT_STRATEGY',
     'MICROSOFT_LEADS_STRATEGY',
+    'LINKEDIN_STRATEGY',
+    'LINKEDIN_PAGE_STRATEGY'
   ],
 })
 export class AuthModule {}

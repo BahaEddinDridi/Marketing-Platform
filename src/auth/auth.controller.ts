@@ -18,9 +18,23 @@ import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
 import { AuthGuard } from '@nestjs/passport';
 import { Response, Request } from 'express';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { LinkedInService } from './linkedIn/linkedIn.service';
+import { Session as ExpressSession } from 'express-session';
+
+interface LinkedInPageUser {
+  redirect?: string;
+  orgProfiles?: any[];
+  // Add other possible page properties
+  id?: string;
+  name?: string;
+  vanityName?: string;
+}
 
 interface AuthenticatedRequest extends Request {
-  user?: { user_id: string; email: string };
+  user?:
+    | { user_id: string; email: string; orgId: string; role?: string }
+    | LinkedInPageUser;
+  session: ExpressSession;
 }
 
 @Controller('auth')
@@ -28,6 +42,7 @@ export class AuthController {
   constructor(
     private prisma: PrismaService,
     private readonly authService: AuthService,
+    private readonly linkedInService: LinkedInService,
   ) {}
 
   @Post('register')
@@ -256,5 +271,49 @@ export class AuthController {
       signInMethod: preferences?.signInMethod ?? true,
       leadSyncEnabled: preferences?.leadSyncEnabled ?? false,
     };
+  }
+
+  ///////////////////////// Linkedin ////////////////////////
+
+  @Get('linkedin')
+  @UseGuards(AuthGuard('linkedin'))
+  async linkedinLogin() {}
+
+  @Get('linkedin/callback')
+  @UseGuards(AuthGuard('linkedin'))
+  async linkedinCallback(@Req() req) {
+    const user = req.user;
+    return { message: 'LinkedIn profile connected', user };
+  }
+
+  @Get('linkedin-page')
+  @UseGuards(AuthGuard('linkedin-page'))
+  async linkedinPageLogin() {}
+
+  @Get('linkedin-page/callback')
+  @UseGuards(AuthGuard('linkedin-page'))
+  async linkedinPageCallback(
+    @Req() req: Request & { session: ExpressSession },
+    @Res() res: Response,
+  ) {
+    const page = req.user as LinkedInPageUser;
+    console.log(
+      'linkedinPageCallback: req.user=',
+      page,
+      'session=',
+      req.session,
+    );
+
+    if (!page || page.redirect !== '/select-page') {
+      console.error('Invalid req.user data:', req.user);
+      return res.redirect(
+        'http://localhost:3000/settings/integrations?error=auth_failed',
+      );
+    }
+
+    const redirectUrl =
+      'http://localhost:3000/select-linkedin-page?auth=success';
+    console.log('Redirecting to:', redirectUrl);
+    res.redirect(redirectUrl);
   }
 }

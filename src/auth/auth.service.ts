@@ -109,7 +109,7 @@ export class AuthService {
 
     return {
       message: 'Login successful',
-      user: { user_id: user.user_id, email: user.email, orgId: user.orgId },
+      user: { user_id: user.user_id, email: user.email, orgId: user.orgId, role: user.role },
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
     };
@@ -163,6 +163,7 @@ export class AuthService {
       user.user_id,
       user.email,
       user.orgId,
+      user.role,
     );
     await this.saveRefreshToken(user.user_id, tokens.refreshToken);
 
@@ -707,4 +708,117 @@ console.log(`Microsoft user validated: ${user.email}, tokens generated`);
     const decoded = this.jwtService.decode(token) as any;
     return decoded?.tid || 'tenant-id-placeholder'; // Replace with actual logic
   }
+
+
+  async getMicrosoftAppToken(orgId: string): Promise<string> {
+  this.logger.log(`Fetching Microsoft app token for org ${orgId}`);
+
+  const { clientId, clientSecret, tenantId } = await this.getEntraCredentials();
+
+  try {
+    const response = await axios.post<MicrosoftTokenResponse>(
+      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+      new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope: 'https://graph.microsoft.com/.default',
+        grant_type: 'client_credentials',
+      }).toString(),
+      {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      },
+    );
+
+    const { access_token, expires_in } = response.data;
+
+    // Update credentials
+    await this.updateMicrosoftLeadsCredentials(
+      access_token,
+      null,
+      expires_in,
+      ['Mail.Read', 'Mail.Send', 'User.Read.All', 'Directory.Read.All'],
+      'LEADS',
+    );
+
+    this.logger.log(`App token acquired for org ${orgId}`);
+    return access_token;
+  } catch (error) {
+    this.logger.error(`Failed to get app token: ${error.message}`);
+    throw new Error('Failed to acquire application token');
+  }
+}
+
+async updateMicrosoftLeadsCredentials(
+  accessToken: string,
+  refreshToken: string | null,
+  expiresIn: number,
+  scopes: string[],
+  type: 'LEADS',
+) {
+  this.logger.log(
+    `Updating Microsoft app credentials for org (type: ${type})`,
+  );
+
+  const org = await this.prisma.organization.findUnique({
+    where: { id: 'single-org' },
+  });
+  if (!org) {
+    this.logger.error(`Organization not found for id: single-org`);
+    throw new Error('Organization not found');
+  }
+
+  const platform = await this.prisma.marketingPlatform.upsert({
+    where: {
+      orgId_platform_name: {
+        orgId: org.id,
+        platform_name: 'Microsoft',
+      },
+    },
+    create: {
+      orgId: org.id,
+      platform_name: 'Microsoft',
+      sync_status: 'CONNECTED',
+    },
+    update: {
+      sync_status: 'CONNECTED',
+    },
+  });
+
+  const existingCredentials = await this.prisma.platformCredentials.findFirst({
+    where: {
+      platform_id: platform.platform_id,
+      user_id: null,
+      type,
+    },
+  });
+
+  if (existingCredentials) {
+    await this.prisma.platformCredentials.update({
+      where: { credential_id: existingCredentials.credential_id },
+      data: {
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        scopes,
+        expires_at: new Date(Date.now() + expiresIn * 1000),
+      },
+    });
+  } else {
+    await this.prisma.platformCredentials.create({
+      data: {
+        platform_id: platform.platform_id,
+        user_id: null, // Org-wide credentials
+        type,
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        scopes,
+        expires_at: new Date(Date.now() + expiresIn * 1000),
+      },
+    });
+  }
+
+  this.logger.log(
+    `Microsoft app credentials updated for org ${org.id}, type: ${type}`,
+  );
+  return { message: 'Microsoft app credentials updated', tenantId: org.tenantId };
+}
 }

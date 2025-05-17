@@ -29,22 +29,47 @@ enum Status {
 }
 
 model Organization {
-  id               String                @id @default("single-org")
-  name             String
-  tenantId         String?
-  sharedMailbox    String?
+  id                  String                @id @default("single-org")
+  name                String
+  tenantId            String?
+  sharedMailbox       String?
   microsoftEntraCreds Json?
-  users            User[]
-  leads            Lead[]
-  platforms        MarketingPlatform[]
-  preferences      MicrosoftPreferences?
-  leadConfig       LeadConfiguration?    @relation("OrgToLeadConfig")
-  emailTemplates   EmailTemplate[]
-  AutoReplyConfigs AutoReplyConfig[]
-  created_at       DateTime              @default(now())
-  updated_at       DateTime              @updatedAt
+  linkedInCreds       Json?
+  users               User[]
+  leads               Lead[]
+  platforms           MarketingPlatform[]
+  preferences         MicrosoftPreferences?
+  linkedInPreferences LinkedInPreferences?
+  leadConfig          LeadConfiguration?    @relation("OrgToLeadConfig")
+  emailTemplates      EmailTemplate[]
+  AutoReplyConfigs    AutoReplyConfig[]
+  linkedInPages       LinkedInPage[]
+  created_at          DateTime              @default(now())
+  updated_at          DateTime              @updatedAt
 
   @@unique([id])
+}
+
+model LinkedInPage {
+  id             String       @id @default(uuid())
+  organizationId String
+  pageId         String       @unique
+  name           String
+  vanityName     String?
+  logoUrl        String?
+  email          String
+  websiteURL     String?
+  description    String?
+  logo           Json?        // Stores logoV2 { cropped, original, cropInfo }
+  coverPhoto     String?        // Stores coverPhotoV2 { cropped, original, cropInfo }
+  staffCount     String?      // e.g., SIZE_11_TO_50
+  specialties    String[]    // Array of specialties
+  address        Json?        // Stores address { country, city, geoLocation, streetAddressFieldState }
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, pageId])
 }
 
 model MicrosoftPreferences {
@@ -55,6 +80,15 @@ model MicrosoftPreferences {
   leadSyncEnabled Boolean      @default(false)
   created_at      DateTime     @default(now())
   updated_at      DateTime     @updatedAt
+}
+
+model LinkedInPreferences {
+  id           String       @id @default(uuid())
+  orgId        String       @unique @default("single-org")
+  organization Organization @relation(fields: [orgId], references: [id])
+  signInMethod Boolean      @default(false)
+  created_at   DateTime     @default(now())
+  updated_at   DateTime     @updatedAt
 }
 
 model LeadConfiguration {
@@ -92,12 +126,27 @@ model User {
   refreshToken           String?
   googleId               String?               @unique
   microsoftId            String?               @unique
+  linkedInProfile        LinkedInProfile?      @relation
   allowPersonalEmailSync Boolean               @default(false)
   assignedLeads          Lead[]                @relation("AssignedTo")
   password_tokens        PasswordResetToken[]
   credentials            PlatformCredentials[]
   created_at             DateTime              @default(now())
   updated_at             DateTime              @updatedAt
+}
+
+model LinkedInProfile {
+  id         String   @id @default(uuid())
+  userId     String   @unique
+  linkedInId String   @unique
+  email      String
+  firstName  String?
+  lastName   String?
+  jobTitle   String?
+  profileUrl String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [user_id])
 }
 
 model PasswordResetToken {
