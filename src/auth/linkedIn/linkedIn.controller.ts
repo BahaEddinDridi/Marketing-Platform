@@ -171,6 +171,7 @@ export class LinkedInController {
     if (!session.orgProfiles) {
       throw new HttpException('No organization profiles found', HttpStatus.NOT_FOUND);
     }
+    console.log('Session in getPageProfiles at 19:07 CET:', session.orgProfiles);
     return { orgProfiles: session.orgProfiles };
   }
 }

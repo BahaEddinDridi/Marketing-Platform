@@ -121,7 +121,6 @@ export class AuthService {
     orgId: string,
     role?: string,
   ) {
-    console.log('Generating tokens for user:', userId, email, orgId, role);
     const accessToken = this.jwtService.sign(
       { sub: userId, email, orgId, role },
       {

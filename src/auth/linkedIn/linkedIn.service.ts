@@ -14,6 +14,14 @@ import { v4 as uuidv4 } from 'uuid';
 interface LinkedInTokenResponse {
   access_token: string;
   expires_in: number;
+  refresh_token?: string;
+  refresh_token_expires_in?: number;
+  scope?: string;
+}
+
+interface LinkedInTokenResponse {
+  access_token: string;
+  expires_in: number;
 }
 
 interface LinkedInMediaResponse {
@@ -22,6 +30,30 @@ interface LinkedInMediaResponse {
   owner: string;
   downloadUrl?: string;
   downloadUrlExpiresAt?: number;
+}
+
+interface LinkedInAdAccount {
+  id: string;
+  name: string;
+  status: string;
+  // Add other properties you need
+}
+
+interface LinkedInAdAccountsResponse {
+  elements: LinkedInAdAccount[];
+  paging?: {
+    count: number;
+    start: number;
+    links: {
+      type: string;
+      rel: string;
+      href: string;
+    }[];
+  };
+}
+interface LinkedInOrganizationResponse {
+  id: string; // Should be "urn:li:organization:12345"
+  // Add other organization properties you expect to use
 }
 
 @Injectable()
@@ -634,6 +666,9 @@ export class LinkedInService {
 
   async connectLinkedInPage(userId: string, session: any) {
     this.logger.log(`Connecting LinkedIn page for user ${userId}`);
+    this.logger.debug(`Current session state: ${JSON.stringify(session)}`);
+
+    this.logger.log(`Connecting LinkedIn page for user ${userId}`);
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
@@ -692,15 +727,19 @@ export class LinkedInService {
       });
     });
 
-    // Clear all session data
-    session.linkedinPageUserId = null;
-    session.orgProfiles = null;
-    session.selectedPageId = null;
-    session.accessToken = null;
-    session.refreshToken = null;
-    this.logger.log(
-      `LinkedIn page disconnected and session cleared: ${pageId}`,
-    );
+    if (session && typeof session.destroy === 'function') {
+      await new Promise((resolve, reject) => {
+        session.destroy((err: any) => {
+          if (err) reject(err);
+          else resolve(null);
+        });
+      });
+      this.logger.log(`Session destroyed for page ${pageId}`);
+    } else {
+      this.logger.warn('Session destroy not available or session is undefined');
+    }
+
+    this.logger.log(`LinkedIn page disconnected: ${pageId}`);
 
     return {
       message: 'LinkedIn page disconnected successfully',
@@ -725,6 +764,7 @@ export class LinkedInService {
           staffCount: true,
           specialties: true,
           address: true,
+          adAccounts: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -743,12 +783,72 @@ export class LinkedInService {
         staffCount: page.staffCount || '',
         specialties: page.specialties || [],
         address: page.address || null,
+        adAccounts: page.adAccounts || [],
         createdAt: page.createdAt,
         updatedAt: page.updatedAt,
       }));
     } catch (error: any) {
       this.logger.error(`Failed to fetch LinkedIn pages: ${error.message}`);
       throw new Error('Failed to fetch LinkedIn pages');
+    }
+  }
+
+  async fetchLinkedInAdAccounts(
+    pageId: string,
+    accessToken: string,
+  ): Promise<any> {
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      'LinkedIn-Version': '202411',
+      'X-RestLi-Protocol-Version': '2.0.0',
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+
+    try {
+      const organizationUrn = `urn:li:organization:${pageId}`;
+      this.logger.log(`Using organization URN: ${organizationUrn}`);
+      const adAccountsUrl = 'https://api.linkedin.com/rest/adAccountUsers';
+      const params = {
+      q: 'authenticatedUser',
+    };
+
+      // Construct the full URL with parameters for logging
+      const urlWithParams = new URL(adAccountsUrl);
+      Object.entries(params).forEach(([key, value]) => {
+        urlWithParams.searchParams.append(key, value as string);
+      });
+      this.logger.log(`Full request URL: ${urlWithParams.toString()}`);
+
+      const response = await axios.get<LinkedInAdAccountsResponse>(
+        adAccountsUrl,
+        {
+          headers,
+          params,
+        },
+      );
+
+      this.logger.log(`Successfully fetched ad accounts for page ${pageId}`);
+      return response.data.elements || [];
+    } catch (error: any) {
+      if (error.response) {
+        this.logger.error(
+          `LinkedIn API Error: ${error.response.status} - ${JSON.stringify(error.response.data)}`,
+        );
+        this.logger.error(
+          `Request Config: ${JSON.stringify({
+            url: error.config?.url,
+            method: error.config?.method,
+            params: error.config?.params,
+            headers: error.config?.headers,
+          })}`,
+        );
+      } else {
+        this.logger.error(
+          `Unexpected Error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      throw new Error('Failed to fetch ad accounts');
     }
   }
 
@@ -770,14 +870,12 @@ export class LinkedInService {
     session.selectedPageId = pageId;
     this.logger.log(`Set session.selectedPageId: ${pageId}`);
 
-    // Find the selected profile
     const profile = orgProfiles.find((p: any) => p.id === pageId);
     if (!profile) {
       this.logger.error(`Profile not found for pageId: ${pageId}`);
       throw new Error('Selected page profile not found');
     }
 
-    // Call validateLinkedInPage
     try {
       const pageData = await this.validateLinkedInPage(
         userId,
@@ -788,12 +886,14 @@ export class LinkedInService {
         profile.emails?.[0]?.value || '',
         session.accessToken,
         session.refreshToken || '',
-        3600,
+        session.expiresIn || 5184000,
         [
           'rw_organization_admin',
           'r_organization_admin',
           'w_organization_social',
           'rw_ads',
+          'r_ads',
+          'r_ads_reporting',
           'profile',
           'email',
           'openid',
@@ -807,7 +907,26 @@ export class LinkedInService {
         profile._json.address || null,
       );
 
-      // Clear session to prevent stale data
+      try {
+        const adAccounts = await this.fetchLinkedInAdAccounts(
+          pageId,
+          session.accessToken,
+        );
+        this.logger.log(`Fetched ad accounts for page ${pageId}:`, adAccounts);
+
+        await this.prisma.linkedInPage.update({
+          where: { pageId },
+          data: {
+            adAccounts: JSON.stringify(adAccounts),
+          },
+        });
+        this.logger.log(`Saved ad accounts for page ${pageId}`);
+      } catch (error: any) {
+        this.logger.error(
+          `Failed to fetch/save ad accounts for page ${pageId}: ${error.message}`,
+        );
+      }
+
       session.orgProfiles = null;
       session.selectedPageId = null;
       session.accessToken = null;
@@ -882,4 +1001,110 @@ export class LinkedInService {
       return null;
     }
   }
+
+  async refreshAccessToken(): Promise<LinkedInTokenResponse> {
+
+    const org = await this.prisma.organization.findUnique({
+      where: { id: 'single-org' },
+    });
+    if (!org) {
+      this.logger.error(`Organization not found for id: single-org`);
+      throw new Error('Organization not found');
+    }
+
+    let platform = await this.prisma.marketingPlatform.findFirst({
+          where: { orgId: org.id, platform_name: 'LinkedIn' },
+        });
+  const credentials = await this.prisma.platformCredentials.findFirst({
+    where: {
+      platform_id: platform?.platform_id,
+      type: 'AUTH',
+      user_id: null,
+    },
+  });
+  if (!credentials || !credentials.refresh_token) {
+    this.logger.error('No refresh token found for platform');
+    throw new InternalServerErrorException('No refresh token available');
+  }
+
+  const { clientId, clientSecret } = await this.getLinkedInCredentials();
+  try {
+    const response = await axios.post<LinkedInTokenResponse>(
+      'https://www.linkedin.com/oauth/v2/accessToken',
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: credentials.refresh_token,
+        client_id: clientId,
+        client_secret: clientSecret,
+      }).toString(),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      },
+    );
+
+    const { access_token, expires_in, refresh_token } = response.data;
+    this.logger.log(`Access token refreshed for platform ${platform?.platform_id}`);
+
+    // Update credentials
+    await this.prisma.platformCredentials.update({
+      where: { credential_id: credentials.credential_id },
+      data: {
+        access_token,
+        refresh_token: refresh_token || credentials.refresh_token,
+        expires_at: new Date(Date.now() + expires_in * 1000),
+      },
+    });
+
+    return response.data;
+  } catch (error: any) {
+    this.logger.error(`Failed to refresh access token: ${error.message}`);
+    if (error.response?.status === 400 && error.response.data?.error === 'invalid_request') {
+      this.logger.error('Refresh token invalid, expired, or revoked. Reauthorization required.');
+      throw new UnauthorizedException('Refresh token invalid. Please reauthorize.');
+    }
+    throw new InternalServerErrorException('Failed to refresh access token');
+  }
+}
+
+async getValidAccessToken(): Promise<string> {
+  const org = await this.prisma.organization.findUnique({
+      where: { id: 'single-org' },
+    });
+    if (!org) {
+      this.logger.error(`Organization not found for id: single-org`);
+      throw new Error('Organization not found');
+    }
+
+    let platform = await this.prisma.marketingPlatform.findFirst({
+          where: { orgId: org.id, platform_name: 'LinkedIn' },
+        });
+  const credentials = await this.prisma.platformCredentials.findFirst({
+    where: {
+      platform_id: platform?.platform_id,
+      type: 'AUTH',
+      user_id: null,
+    },
+  });
+  if (!credentials) {
+    this.logger.error('No credentials found for platform');
+    throw new InternalServerErrorException('No credentials found');
+  }
+  if (!credentials.access_token) {
+    this.logger.error('Access token missing for platform');
+    throw new InternalServerErrorException('Access token missing');
+  }
+
+  const now = new Date();
+  if (credentials.expires_at && credentials.expires_at > now) {
+    this.logger.log(`Using existing access token for platform ${platform?.platform_id}`);
+    return credentials.access_token;
+  }
+  this.logger.log(`Access token expired for platform ${platform?.platform_id}, refreshing`);
+  const { access_token } = await this.refreshAccessToken();
+  return access_token;
+}
+
+
 }

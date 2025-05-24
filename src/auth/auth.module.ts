@@ -41,11 +41,12 @@ import { LinkedInPageStrategyProvider } from 'src/middlewares/linkedIn/linkedin-
   ],
   exports: [
     AuthService,
+    LinkedInService,
     MicrosoftAuthConfigService,
     'MICROSOFT_STRATEGY',
     'MICROSOFT_LEADS_STRATEGY',
     'LINKEDIN_STRATEGY',
-    'LINKEDIN_PAGE_STRATEGY'
+    'LINKEDIN_PAGE_STRATEGY',
   ],
 })
 export class AuthModule {}

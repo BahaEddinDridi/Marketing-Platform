@@ -79,7 +79,8 @@ export class AutoReplyService {
     }
 
     // Check if token is still valid
-    const isExpired = creds.expires_at && new Date(creds.expires_at) < new Date();
+    const isExpired =
+      creds.expires_at && new Date(creds.expires_at) < new Date();
     if (!isExpired && creds.access_token) {
       return { creds, needsAuth: false };
     }
@@ -133,6 +134,20 @@ export class AutoReplyService {
           HttpStatus.BAD_REQUEST,
         );
       }
+      const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+      if (!emailRegex.test(lead.email)) {
+        this.logger.warn(`Invalid lead email ${lead.email} for lead ${lead.lead_id}`);
+        // Fetch the original sender email from the conversation
+        const conversation = await this.prisma.leadConversation.findFirst({
+          where: { conversationId, leadId: lead.lead_id },
+          include: { emails: { where: { isIncoming: true }, take: 1 } },
+        });
+        // Assert from as an object with email property
+        const from = conversation?.emails[0]?.from as { email: string } | undefined;
+        lead.email = from?.email || mailbox;
+        this.logger.log(`Falling back to sender email ${lead.email} for lead ${lead.lead_id}`);
+      }
+
       this.logger.log(
         `Sending reply to message ID ${originalMessageId} for ${lead.email}`,
       );
@@ -205,7 +220,6 @@ export class AutoReplyService {
     }
   }
 
-
   // Process auto-replies for eligible leads
   async processAutoReplies(orgId: string, configId: string) {
     this.logger.log(
@@ -245,18 +259,23 @@ export class AutoReplyService {
         token = await this.authService.getMicrosoftAppToken(orgId);
       }
 
+      const leadConfig = await this.prisma.leadConfiguration.findUnique({
+        where: { orgId },
+        select: { specialEmails: true, excludedEmails: true },
+      });
+      const specialEmails = (leadConfig?.specialEmails || []).map((email) =>
+        email.toLowerCase(),
+      );
+      const excludedEmails = (leadConfig?.excludedEmails || []).map((email) =>
+        email.toLowerCase(),
+      );
+
       // Fetch leads with status NEW and exactly one incoming email
       const leads = await this.prisma.lead.findMany({
         where: {
           orgId,
           status: LeadStatus.NEW,
-          conversations: {
-            some: {
-              emails: {
-                every: { isIncoming: true },
-              },
-            },
-          },
+          conversations: { some: { emails: { every: { isIncoming: true } } } },
         },
         include: {
           conversations: {
@@ -272,13 +291,23 @@ export class AutoReplyService {
               },
             },
           },
-          assignedTo: {
-            select: { email: true },
-          },
+          assignedTo: { select: { email: true } },
         },
       });
 
       for (const lead of leads) {
+        const leadEmail = lead.email?.toLowerCase();
+        if (
+          leadEmail &&
+          (specialEmails.includes(leadEmail) ||
+            excludedEmails.includes(leadEmail))
+        ) {
+          this.logger.log(
+            `Skipping auto-reply for lead ${lead.lead_id} with email ${lead.email} (in specialEmails or excludedEmails)`,
+          );
+          continue;
+        }
+
         const conversation = lead.conversations.find(
           (conv) => conv.emails.length === 1 && conv.emails[0].isIncoming,
         );
@@ -301,7 +330,7 @@ export class AutoReplyService {
 
         let mailbox: string | null = null;
         if (config.mailbox) {
-          mailbox = lead.assignedTo?.email || null;
+          mailbox = lead.assignedTo?.email || config.organization.sharedMailbox;
           if (!mailbox) {
             this.logger.warn(
               `No assigned user email for lead ${lead.lead_id}, skipping auto-reply`,

@@ -12,6 +12,10 @@ export const MicrosoftLeadsStrategyProvider: Provider = {
     prisma: PrismaService,
   ) => {
     const config = await configService.getConfig();
+    if (!config) {
+      console.warn('Skipping MicrosoftStrategy initialization: No credentials available');
+      return null; // Skip strategy initialization
+    }
     return new MicrosoftLeadsStrategy(authService, config, prisma);
   },
   inject: [AuthService, MicrosoftAuthConfigService, PrismaService],

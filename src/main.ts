@@ -3,9 +3,15 @@ import { AppModule } from './app.module';
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import * as cookieParser from 'cookie-parser';
 import * as session from 'express-session';
+import { Request, Response } from 'express';
+
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { abortOnError: false });
+
+
+
+
   app.use(
     session({
       secret: 'your-session-secret', // Replace with a secure secret
@@ -32,6 +38,8 @@ async function bootstrap() {
       },
     }),
   );
+
+
   
   await app.listen(process.env.PORT ?? 5000);
 }

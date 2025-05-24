@@ -22,7 +22,10 @@ import { LeadStatus } from '@prisma/client';
 interface AuthenticatedRequest extends Request {
   user?: { user_id: string; email: string; orgId: string; role: string };
 }
-
+interface Folder {
+  id: string;
+  name: string;
+}
 @Controller('leads')
 export class LeadController {
   constructor(private readonly leadService: LeadService) {}
@@ -60,10 +63,10 @@ export class LeadController {
     let validatedStatuses: LeadStatus[] | undefined;
     if (status) {
       const statusArray = status.split(',').map((s) => s.trim());
-      const validStatuses = Object.values(LeadStatus); // [NEW, CONTACTED, IN_PROGRESS, CONVERTED, CLOSED]
+      const validStatuses = Object.values(LeadStatus);
       validatedStatuses = statusArray.filter((s) =>
         validStatuses.includes(s as LeadStatus),
-      ) as LeadStatus[]; // Explicit cast to LeadStatus[]
+      ) as LeadStatus[];
       if (validatedStatuses.length === 0) {
         throw new HttpException(
           'Invalid status values',
@@ -72,11 +75,10 @@ export class LeadController {
       }
     }
 
-    // Parse source array
     let validatedSources: string[] | undefined;
     if (source) {
       validatedSources = source.split(',').map((s) => s.trim());
-      const validSources = ['email', 'web', 'manual']; // Adjust based on schema
+      const validSources = ['email', 'web', 'manual'];
       validatedSources = validatedSources.filter((s) =>
         validSources.includes(s),
       );
@@ -94,6 +96,13 @@ export class LeadController {
       parseInt(pageSize) || 10,
       { search, status: validatedStatuses, source: validatedSources },
     );
+  }
+
+  @Get('getAllByUserId')
+  @UseGuards(JwtAuthGuard)
+  async getAllByUserId(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    return this.leadService.fetchAllLeadsByUserId(user.orgId, user.user_id);
   }
 
   @Get('conversation/:leadId')
@@ -132,14 +141,28 @@ export class LeadController {
     @Body()
     data: {
       filters?: string[];
-      folders?: Record<string, string>;
+      folders?: Record<string, string[]>;
       syncInterval?: string;
+      excludedEmails?: string[];
+      specialEmails?: string[];
+      sharedMailbox?: string;
     },
   ) {
     const user = req.user as { orgId: string };
     if (user.orgId !== orgId)
       throw new HttpException('Forbidden', HttpStatus.FORBIDDEN);
     return this.leadService.updateLeadConfig(orgId, data);
+  }
+  @Get(':orgId/:mailboxEmail/folders')
+  @UseGuards(JwtAuthGuard)
+  async listMailboxFolders(
+    @Param('orgId') orgId: string,
+    @Param('mailboxEmail') mailboxEmail: string,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<Folder[]> {
+    const user = req.user as { orgId: string };
+
+    return this.leadService.listMailboxFolders(orgId, mailboxEmail);
   }
 
   @Post('setup')
@@ -150,8 +173,10 @@ export class LeadController {
     data: {
       sharedMailbox: string;
       filters?: string[];
-      folders?: Record<string, string>;
+      folders?: Record<string, string[]>;
       syncInterval?: string;
+      excludedEmails?: string[];
+      specialEmails?: string[];
     },
   ) {
     const user = req.user as { user_id: string; orgId: string };

@@ -79,6 +79,8 @@ export class LinkedInPageStrategy extends PassportStrategy(
         'r_organization_admin',
         'w_organization_social',
         'rw_ads',
+        'r_ads',
+        'r_ads_reporting',
         'profile',
         'email',
         'openid',
@@ -137,7 +139,7 @@ export class LinkedInPageStrategy extends PassportStrategy(
             {
               headers: {
                 Authorization: `Bearer ${accessToken}`,
-                'LinkedIn-Version': '202408',
+                'LinkedIn-Version': '202411',
               },
             },
           );
@@ -203,9 +205,11 @@ export class LinkedInPageStrategy extends PassportStrategy(
     }
 
     // Store profile data in session
+    const expiresIn = profile.expires_in || 5184000;
     req.session.orgProfiles = profile.orgProfiles;
-    req.session.accessToken = profile.accessToken;
+    req.session.accessToken = accessToken;
     req.session.refreshToken = refreshToken;
+    req.session.expiresIn = expiresIn;
     this.logger.log('Stored orgProfiles in session:', req.session.orgProfiles);
 
     return done(null, { redirect: '/select-page' });

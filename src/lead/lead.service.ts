@@ -14,6 +14,9 @@ import * as schedule from 'node-schedule';
 import { v2 as cloudinary } from 'cloudinary';
 import { Readable } from 'stream';
 import { LeadStatus, Prisma } from '@prisma/client';
+import * as striptags from 'striptags';
+import Bottleneck from 'bottleneck';
+import pLimit from 'p-limit';
 
 interface GraphEmailResponse {
   value: {
@@ -89,6 +92,7 @@ export class LeadService {
     EVERY_DAY: '0 0 * * *',
   };
   private jobs = new Map<string, schedule.Job>();
+  private runningSyncs = new Set<string>();
   private readonly platformName = 'Microsoft';
   private readonly scopes = [
     'Mail.Read',
@@ -96,7 +100,10 @@ export class LeadService {
     'User.Read.All',
     'Directory.Read.All',
   ];
-
+  private readonly limiter = new Bottleneck({
+    maxConcurrent: 10, // Allow up to 10 concurrent requests
+    minTime: 100, // Minimum 100ms between requests (adjust based on rate limits)
+  });
   constructor(
     private readonly prisma: PrismaService,
     private readonly authService: AuthService,
@@ -186,7 +193,6 @@ export class LeadService {
     token: string,
   ): Promise<Mailbox[]> {
     try {
-      // Fetch all users in the tenant using Graph API
       const response = await axios.get<GraphUsersResponse>(
         'https://graph.microsoft.com/v1.0/users',
         {
@@ -206,21 +212,22 @@ export class LeadService {
 
       const mailboxes: Mailbox[] = [
         { email: sharedMailbox, assignedToId: null, label: 'Shared Mailbox' },
+        ...users
+          .map((user) => {
+            const email = user.mail || user.userPrincipalName;
+            const member = members.find(
+              (m) => m.email.toLowerCase() === email.toLowerCase(),
+            );
+            return member
+              ? {
+                  email,
+                  assignedToId: member.user_id as string | null, // Explicitly match Mailbox type
+                  label: `${email}’s Inbox`,
+                }
+              : null;
+          })
+          .filter((mailbox): mailbox is Mailbox => mailbox !== null),
       ];
-
-      for (const user of users) {
-        const email = user.mail || user.userPrincipalName;
-        const member = members.find(
-          (m) => m.email.toLowerCase() === email.toLowerCase(),
-        );
-        if (member) {
-          mailboxes.push({
-            email,
-            assignedToId: member.user_id,
-            label: `${email}’s Inbox`,
-          });
-        }
-      }
 
       return mailboxes;
     } catch (error) {
@@ -231,287 +238,362 @@ export class LeadService {
   }
 
   private async getFolders(
-    orgId: string,
-    token: string,
-    mailboxEmail: string,
-  ): Promise<Folder[]> {
-    const leadConfig = await this.prisma.leadConfiguration.findUnique({
-      where: { orgId },
-    });
-
-    if (leadConfig?.folders) {
-      return Object.entries(leadConfig.folders).map(([id, name]) => ({
-        id,
-        name,
-      }));
-    }
-
-    try {
-      const response = await axios.get<{
-        value: { id: string; displayName: string; wellKnownName?: string }[];
-      }>(`https://graph.microsoft.com/v1.0/users/${mailboxEmail}/mailFolders`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { $top: 50 },
-      });
-
-      const folders = response.data.value
-        .filter(
-          (folder) =>
-            folder.wellKnownName?.toLowerCase() === 'inbox' ||
-            folder.wellKnownName?.toLowerCase() === 'junkemail' ||
-            folder.displayName.toLowerCase().includes('inbox') ||
-            folder.displayName.toLowerCase().includes('junk'),
-        )
-        .map((folder) => ({
-          id: folder.id,
-          name: folder.displayName,
-        }));
-
-      if (folders.length === 0) {
-        return [
-          { name: 'Inbox', id: 'inbox' },
-          { name: 'Junk', id: 'junkemail' },
-        ];
-      }
-
-      await this.prisma.leadConfiguration.upsert({
-        where: { orgId },
-        update: {
-          folders: Object.fromEntries(folders.map((f) => [f.id, f.name])),
-        },
-        create: {
-          orgId,
-          filters: ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
-          folders: Object.fromEntries(folders.map((f) => [f.id, f.name])),
-          syncInterval: 'EVERY_HOUR',
-        },
-      });
-
-      return folders;
-    } catch (error) {
-      return [
-        { name: 'Inbox', id: 'inbox' },
-        { name: 'Junk', id: 'junkemail' },
-      ];
-    }
-  }
-
- private async fetchConversationThread(
   orgId: string,
-  mailboxEmail: string,
-  conversationId: string,
   token: string,
-): Promise<GraphEmailResponse['value']> {
-  try {
-    const encodedMailbox = encodeURIComponent(mailboxEmail);
-    // Fetch all folders dynamically
-    const folderResponse = await axios.get<{
-      value: { id: string; displayName: string; wellKnownName?: string }[];
-    }>(`https://graph.microsoft.com/v1.0/users/${encodedMailbox}/mailFolders`, {
-      headers: { Authorization: `Bearer ${token}` },
-      params: { $top: 100 },
-    });
+  mailboxEmail: string,
+): Promise<Folder[]> {
+  const leadConfig = await this.prisma.leadConfiguration.findUnique({
+    where: { orgId },
+  });
 
-    const folders = folderResponse.data.value.map(folder => ({
-      id: folder.id,
-      name: folder.displayName,
-    }));
+  const configuredFolders: Record<string, { id: string; name: string }[]> =
+    (leadConfig?.folders as Record<string, { id: string; name: string }[]>) || {};
+  const mailboxFolders = configuredFolders[mailboxEmail.toLowerCase()] || [];
 
-    let allEmails: GraphEmailResponse['value'] = [];
-
-    // Try primary mailbox
-    for (const folder of folders) {
-      let url = `https://graph.microsoft.com/v1.0/users/${encodedMailbox}/mailFolders/${folder.id}/messages`;
-      let messageIds: { id: string }[] = [];
-      do {
-        try {
-          const response = await axios.get<{ value: { id: string }[]; '@odata.nextLink'?: string }>(
-            url,
-            {
-              headers: { Authorization: `Bearer ${token}` },
-              params: {
-                $filter: `conversationId eq '${conversationId}'`,
-                $select: 'id',
-                $top: 50,
-              },
-            },
-          );
-          messageIds = messageIds.concat(response.data.value);
-          url = response.data['@odata.nextLink'] || '';
-        } catch (error) {
-          this.logger.error(`Failed to fetch messages from ${mailboxEmail}/${folder.name}: ${error.message}`);
-          break;
-        }
-      } while (url);
-
-      this.logger.log(
-        `Fetched ${messageIds.length} message IDs for conversation ${conversationId} from ${mailboxEmail}/${folder.name}`,
-      );
-
-      const emailPromises = messageIds.map(async ({ id }) => {
-        try {
-          const emailResponse = await axios.get<GraphEmailResponse['value'][0]>(
-            `https://graph.microsoft.com/v1.0/users/${encodedMailbox}/messages/${id}`,
-            {
-              headers: { Authorization: `Bearer ${token}` },
-              params: {
-                $select:
-                  'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body,bodyPreview,hasAttachments,conversationId,internetMessageId',
-              },
-            },
-          );
-          const email = emailResponse.data;
-          this.logger.log(
-            `Fetched email ${id} from ${mailboxEmail}/${folder.name}: ` +
-            `toRecipients=${JSON.stringify(email.toRecipients)}, ` +
-            `from=${JSON.stringify(email.from)}`,
-          );
-          if (email.hasAttachments) {
-            try {
-              const attachmentResponse = await axios.get<AttachmentResponse>(
-                `https://graph.microsoft.com/v1.0/users/${encodedMailbox}/messages/${id}/attachments`,
-                { headers: { Authorization: `Bearer ${token}` } },
-              );
-              email.attachments = attachmentResponse.data.value;
-            } catch (error) {
-              this.logger.error(
-                `Failed to fetch attachments for email ${id}: ${error.message}`,
-              );
-              email.attachments = [];
-            }
-          }
-          return email;
-        } catch (error) {
-          this.logger.error(`Failed to fetch email ${id} from ${mailboxEmail}/${folder.name}: ${error.message}`);
-          return undefined;
-        }
-      });
-
-      const emails = (await Promise.all(emailPromises)).filter(
-        (email): email is GraphEmailResponse['value'][0] => email !== undefined && email !== null,
-      );
-      allEmails = allEmails.concat(emails);
-    }
-
-    // If no emails found, try other mailboxes
-    if (allEmails.length === 0) {
-      const mailboxes = await this.getMailboxes(orgId, mailboxEmail, token);
-      for (const altMailbox of mailboxes.filter(m => m.email !== mailboxEmail)) {
-        const altEncodedMailbox = encodeURIComponent(altMailbox.email);
-        const altFolderResponse = await axios.get<{
-          value: { id: string; displayName: string; wellKnownName?: string }[];
-        }>(`https://graph.microsoft.com/v1.0/users/${altEncodedMailbox}/mailFolders`, {
+  if (mailboxFolders.length > 0) {
+    try {
+      const batchRequest = {
+        requests: mailboxFolders.map((folder, i) => ({
+          id: `folder_${i}`,
+          method: 'GET',
+          url: `/users/${encodeURIComponent(mailboxEmail)}/mailFolders/${folder.id}`,
+        })),
+      };
+      const response = await this.limiter.schedule(() =>
+        axios.post<{
+          responses: { id: string; status: number; body: { id: string; displayName: string } }[];
+        }>('https://graph.microsoft.com/v1.0/$batch', batchRequest, {
           headers: { Authorization: `Bearer ${token}` },
-          params: { $top: 100 },
-        });
+        }),
+      );
 
-        const altFolders = altFolderResponse.data.value.map(folder => ({
-          id: folder.id,
-          name: folder.displayName,
-        }));
+      const validFolders: Folder[] = response.data.responses
+        .map((res, i) => {
+          if (res.status < 400) {
+            return {
+              id: mailboxFolders[i].id,
+              name: mailboxFolders[i].name, // Use stored name
+            };
+          }
+          return null;
+        })
+        .filter((folder): folder is Folder => folder !== null);
 
-        for (const folder of altFolders) {
-          let url = `https://graph.microsoft.com/v1.0/users/${altEncodedMailbox}/mailFolders/${folder.id}/messages`;
-          let messageIds: { id: string }[] = [];
-          do {
-            try {
-              const response = await axios.get<{ value: { id: string }[]; '@odata.nextLink'?: string }>(
-                url,
-                {
-                  headers: { Authorization: `Bearer ${token}` },
-                  params: {
-                    $filter: `conversationId eq '${conversationId}'`,
-                    $select: 'id',
-                    $top: 50,
-                  },
-                },
-              );
-              messageIds = messageIds.concat(response.data.value);
-              url = response.data['@odata.nextLink'] || '';
-            } catch (error) {
-              this.logger.error(`Failed to fetch messages from ${altMailbox.email}/${folder.name}: ${error.message}`);
-              break;
-            }
-          } while (url);
-
-          this.logger.log(
-            `Fetched ${messageIds.length} message IDs for conversation ${conversationId} from ${altMailbox.email}/${folder.name}`,
-          );
-
-          const emailPromises = messageIds.map(async ({ id }) => {
-            try {
-              const emailResponse = await axios.get<GraphEmailResponse['value'][0]>(
-                `https://graph.microsoft.com/v1.0/users/${altEncodedMailbox}/messages/${id}`,
-                {
-                  headers: { Authorization: `Bearer ${token}` },
-                  params: {
-                    $select:
-                      'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body,bodyPreview,hasAttachments,conversationId,internetMessageId',
-                  },
-                },
-              );
-              const email = emailResponse.data;
-              this.logger.log(
-                `Fetched email ${id} from ${altMailbox.email}/${folder.name}: ` +
-                `toRecipients=${JSON.stringify(email.toRecipients)}, ` +
-                `from=${JSON.stringify(email.from)}`,
-              );
-              if (email.hasAttachments) {
-                try {
-                  const attachmentResponse = await axios.get<AttachmentResponse>(
-                    `https://graph.microsoft.com/v1.0/users/${altEncodedMailbox}/messages/${id}/attachments`,
-                    { headers: { Authorization: `Bearer ${token}` } },
-                  );
-                  email.attachments = attachmentResponse.data.value;
-                } catch (error) {
-                  this.logger.error(
-                    `Failed to fetch attachments for email ${id}: ${error.message}`,
-                  );
-                  email.attachments = [];
-                }
-              }
-              return email;
-            } catch (error) {
-              this.logger.error(`Failed to fetch email ${id} from ${altMailbox.email}/${folder.name}: ${error.message}`);
-              return undefined;
-            }
-          });
-
-          const emails = (await Promise.all(emailPromises)).filter(
-            (email): email is GraphEmailResponse['value'][0] => email !== undefined && email !== null,
-          );
-          allEmails = allEmails.concat(emails);
-        }
+      if (validFolders.length > 0) {
+        return validFolders;
       }
+    } catch (error) {
+      // Fall through to fetch fresh folders
     }
-
-    return allEmails.sort(
-      (a, b) =>
-        new Date(a.receivedDateTime).getTime() -
-        new Date(b.receivedDateTime).getTime(),
-    );
-  } catch (error) {
-    this.logger.error(
-      `Failed to fetch conversation ${conversationId} from ${mailboxEmail}: ${error.message}`,
-      error.response?.data,
-    );
-    return [];
   }
+
+  // Fetch fresh folders if none configured or validation failed
+  const freshFolders = await this.listMailboxFolders(orgId, mailboxEmail);
+
+  // Update LeadConfiguration with fresh folders
+  await this.prisma.leadConfiguration.upsert({
+    where: { orgId },
+    update: {
+      folders: {
+        ...configuredFolders,
+        [mailboxEmail.toLowerCase()]: freshFolders.map((f) => ({ id: f.id, name: f.name })),
+      },
+    },
+    create: {
+      orgId,
+      folders: {
+        [mailboxEmail.toLowerCase()]: freshFolders.map((f) => ({ id: f.id, name: f.name })),
+      },
+      syncInterval: 'EVERY_HOUR',
+      filters: ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
+    },
+  });
+
+  return freshFolders;
 }
+  private async fetchConversationThread(
+    orgId: string,
+    mailboxEmail: string,
+    conversationId: string,
+    token: string,
+  ): Promise<GraphEmailResponse['value']> {
+    const limit = pLimit(5);
+    try {
+      const folderResponse = await this.limiter.schedule(() =>
+        axios.get<{
+          value: { id: string; displayName: string; wellKnownName?: string }[];
+        }>(
+          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailboxEmail)}/mailFolders`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { $top: 100 },
+          },
+        ),
+      );
+
+      const folders = folderResponse.data.value.map((folder) => ({
+        id: folder.id,
+        name: folder.displayName,
+      }));
+
+      const fetchEmailsFromFolder = async (
+        folder: Folder,
+        email: string,
+      ): Promise<GraphEmailResponse['value']> => {
+        let url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}/mailFolders/${folder.id}/messages`;
+        let messageIds: { id: string }[] = [];
+        do {
+          try {
+            const response = await this.limiter.schedule(() =>
+              axios.get<{
+                value: { id: string }[];
+                '@odata.nextLink'?: string;
+              }>(url, {
+                headers: { Authorization: `Bearer ${token}` },
+                params: {
+                  $filter: `conversationId eq '${conversationId}'`,
+                  $select: 'id',
+                  $top: 50,
+                },
+              }),
+            );
+            messageIds = messageIds.concat(response.data.value);
+            url = response.data['@odata.nextLink'] || '';
+          } catch (error) {
+            break;
+          }
+        } while (url);
+
+        const emailPromises = messageIds.map(({ id }) =>
+          limit(() =>
+            this.limiter.schedule(async () => {
+              try {
+                const emailResponse = await axios.get<
+                  GraphEmailResponse['value'][0]
+                >(
+                  `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}/messages/${id}`,
+                  {
+                    headers: { Authorization: `Bearer ${token}` },
+                    params: {
+                      $select:
+                        'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body,bodyPreview,hasAttachments,conversationId,internetMessageId',
+                    },
+                  },
+                );
+                const emailData = emailResponse.data;
+                if (emailData.hasAttachments) {
+                  const attachmentResponse = await this.limiter.schedule(() =>
+                    axios.get<AttachmentResponse>(
+                      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}/messages/${id}/attachments`,
+                      { headers: { Authorization: `Bearer ${token}` } },
+                    ),
+                  );
+                  emailData.attachments = attachmentResponse.data.value;
+                }
+                return emailData;
+              } catch (error) {
+                return undefined;
+              }
+            }),
+          ),
+        );
+
+        return (await Promise.all(emailPromises)).filter(
+          (email): email is GraphEmailResponse['value'][0] =>
+            email !== undefined,
+        );
+      };
+
+      let allEmails = (
+        await Promise.all(
+          folders.map((folder) =>
+            limit(() => fetchEmailsFromFolder(folder, mailboxEmail)),
+          ),
+        )
+      ).flat();
+
+      if (allEmails.length === 0) {
+        const mailboxes = await this.getMailboxes(orgId, mailboxEmail, token);
+        const altMailboxes = mailboxes.filter((m) => m.email !== mailboxEmail);
+        const altEmailPromises = await Promise.all(
+          altMailboxes.map(async (altMailbox) => {
+            const response = await this.limiter.schedule(() =>
+              axios.get<{
+                value: {
+                  id: string;
+                  displayName: string;
+                  wellKnownName?: string;
+                }[];
+              }>(
+                `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(altMailbox.email)}/mailFolders`,
+                {
+                  headers: { Authorization: `Bearer ${token}` },
+                  params: { $top: 100 },
+                },
+              ),
+            );
+            const folders = response.data.value.map((folder) => ({
+              id: folder.id,
+              name: folder.displayName,
+            }));
+            return Promise.all(
+              folders.map((folder) =>
+                limit(() => fetchEmailsFromFolder(folder, altMailbox.email)),
+              ),
+            );
+          }),
+        );
+        const resolvedEmails = altEmailPromises.flat();
+        allEmails = resolvedEmails.flat();
+      }
+
+      return allEmails.sort(
+        (a, b) =>
+          new Date(a.receivedDateTime).getTime() -
+          new Date(b.receivedDateTime).getTime(),
+      );
+    } catch (error) {
+      return [];
+    }
+  }
 
   private async fetchEmails(
     orgId: string,
     mailboxes: Mailbox[],
     token: string,
   ): Promise<GraphEmailResponse['value']> {
-    let allEmails: GraphEmailResponse['value'] = [];
+    const limit = pLimit(5);
+    const allEmails: GraphEmailResponse['value'] = [];
 
-    for (const mailbox of mailboxes) {
-      this.logger.log(`Fetching leads from ${mailbox.label}`);
-      const folders = await this.getFolders(orgId, token, mailbox.email);
+    const folderPromises = mailboxes.flatMap((mailbox) =>
+      this.getFolders(orgId, token, mailbox.email).then((folders) =>
+        folders.map((folder) =>
+          limit(() =>
+            this.limiter.schedule(() =>
+              this.fetchEmailsFromFolder(orgId, mailbox, folder, token),
+            ),
+          ),
+        ),
+      ),
+    );
 
-      for (const folder of folders) {
-        const syncState = await this.prisma.syncState.findUnique({
+    const folderResults = await Promise.all(folderPromises);
+    const results = await Promise.allSettled(folderResults.flat());
+    results.forEach((result) => {
+      if (result.status === 'fulfilled') {
+        allEmails.push(...result.value);
+      }
+    });
+
+    return allEmails;
+  }
+
+  private async fetchEmailsFromFolder(
+    orgId: string,
+    mailbox: Mailbox,
+    folder: Folder,
+    token: string,
+  ): Promise<GraphEmailResponse['value']> {
+    const syncState = await this.prisma.syncState.findUnique({
+      where: {
+        orgId_mailboxEmail_folderId_unique: {
+          orgId,
+          mailboxEmail: mailbox.email,
+          folderId: folder.id,
+        },
+      },
+    });
+
+    const url =
+      syncState?.deltaLink ||
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox.email)}/mailFolders/${folder.id}/messages/delta`;
+    const batchRequest = {
+      requests: [
+        {
+          id: 'messages',
+          method: 'GET',
+          url: url.replace('https://graph.microsoft.com/v1.0', ''),
+          params: syncState?.deltaLink
+            ? {}
+            : {
+                $top: 50,
+                $select:
+                  'id,subject,from,receivedDateTime,body,bodyPreview,hasAttachments,conversationId,internetMessageId,toRecipients,ccRecipients,bccRecipients',
+                $filter: `receivedDateTime ge ${new Date(
+                  Date.now() - 30 * 24 * 60 * 60 * 1000,
+                ).toISOString()}`,
+              },
+        },
+      ],
+    };
+
+    try {
+      const response = await axios.post<{
+        responses: { id: string; status: number; body: GraphEmailResponse }[];
+      }>('https://graph.microsoft.com/v1.0/$batch', batchRequest, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      const messageResponse = response.data.responses.find(
+        (r) => r.id === 'messages',
+      );
+      if (!messageResponse || messageResponse.status >= 400) {
+        throw new Error('Batch request failed');
+      }
+
+      const emails = messageResponse.body.value.map((email) => ({
+        ...email,
+        _sourceMailbox: mailbox.email,
+        _sourceFolder: folder.name,
+      }));
+
+      const emailsWithAttachments = await Promise.all(
+        emails
+          .filter((email) => email.hasAttachments)
+          .map(async (email) => {
+            try {
+              const batchAttachmentRequest = {
+                requests: [
+                  {
+                    id: 'attachments',
+                    method: 'GET',
+                    url: `/users/${encodeURIComponent(mailbox.email)}/messages/${email.id}/attachments`,
+                  },
+                ],
+              };
+              const attachmentResponse = await this.limiter.schedule(() =>
+                axios.post<{
+                  responses: {
+                    id: string;
+                    status: number;
+                    body: AttachmentResponse;
+                  }[];
+                }>(
+                  'https://graph.microsoft.com/v1.0/$batch',
+                  batchAttachmentRequest,
+                  { headers: { Authorization: `Bearer ${token}` } },
+                ),
+              );
+              const attachmentBody = attachmentResponse.data.responses.find(
+                (r) => r.id === 'attachments',
+              )?.body;
+              return { ...email, attachments: attachmentBody?.value || [] };
+            } catch (error) {
+              return { ...email, attachments: [] };
+            }
+          }),
+      );
+
+      const finalEmails = emails.map((email) => ({
+        ...email,
+        attachments:
+          emailsWithAttachments.find((e) => e.id === email.id)?.attachments ||
+          email.attachments ||
+          [],
+      }));
+
+      if (messageResponse.body['@odata.deltaLink']) {
+        await this.prisma.syncState.upsert({
           where: {
             orgId_mailboxEmail_folderId_unique: {
               orgId,
@@ -519,137 +601,64 @@ export class LeadService {
               folderId: folder.id,
             },
           },
+          update: {
+            deltaLink: messageResponse.body['@odata.deltaLink'],
+            lastSyncedAt: new Date(),
+          },
+          create: {
+            orgId,
+            platform: this.platformName,
+            mailboxEmail: mailbox.email,
+            folderId: folder.id,
+            deltaLink: messageResponse.body['@odata.deltaLink'],
+          },
         });
-
-        let url =
-          syncState?.deltaLink ||
-          `https://graph.microsoft.com/v1.0/users/${mailbox.email}/mailFolders/${folder.id}/messages/delta`;
-        const params = syncState?.deltaLink
-          ? {}
-          : {
-              $top: 50,
-              $select:
-                'id,subject,from,receivedDateTime,body,bodyPreview,hasAttachments,conversationId,internetMessageId,toRecipients,ccRecipients,bccRecipients',
-              $filter: `receivedDateTime ge ${new Date(
-                Date.now() - 30 * 24 * 60 * 60 * 1000,
-              ).toISOString()}`,
-            };
-
-        try {
-          const response = await axios.get<GraphEmailResponse>(url, {
-            headers: { Authorization: `Bearer ${token}` },
-            params,
-          });
-
-          const emailsWithDetails = response.data.value.map((email) => ({
-            ...email,
-            _sourceMailbox: mailbox.email,
-            _sourceFolder: folder.name,
-          }));
-
-          this.logger.log(
-            `Fetched ${emailsWithDetails.length} emails from ${mailbox.email}/${folder.name}`,
-          );
-
-          const emailsWithAttachments = await Promise.all(
-            emailsWithDetails
-              .filter((email) => email.hasAttachments)
-              .map(async (email) => {
-                try {
-                  const attachmentResponse =
-                    await axios.get<AttachmentResponse>(
-                      `https://graph.microsoft.com/v1.0/users/${mailbox.email}/messages/${email.id}/attachments`,
-                      { headers: { Authorization: `Bearer ${token}` } },
-                    );
-                  return {
-                    ...email,
-                    attachments: attachmentResponse.data.value,
-                  };
-                } catch (error) {
-                  this.logger.error(
-                    `Failed to fetch attachments for email ${email.id}: ${error.message}`,
-                  );
-                  return { ...email, attachments: [] };
-                }
-              }),
-          );
-
-          allEmails = allEmails.concat(
-            emailsWithDetails.map((detail) => ({
-              ...detail,
-              attachments:
-                emailsWithAttachments.find((e) => e.id === detail.id)
-                  ?.attachments || detail.attachments,
-            })),
-          );
-
-          if (response.data['@odata.deltaLink']) {
-            await this.prisma.syncState.upsert({
-              where: {
-                orgId_mailboxEmail_folderId_unique: {
-                  orgId,
-                  mailboxEmail: mailbox.email,
-                  folderId: folder.id,
-                },
-              },
-              update: {
-                deltaLink: response.data['@odata.deltaLink'],
-                lastSyncedAt: new Date(),
-              },
-              create: {
-                orgId,
-                platform: this.platformName,
-                mailboxEmail: mailbox.email,
-                folderId: folder.id,
-                deltaLink: response.data['@odata.deltaLink'],
-              },
-            });
-          }
-        } catch (folderError) {
-          this.logger.error(
-            `${mailbox.label} - ${folder.name} failed: ${folderError.message}`,
-          );
-          continue;
-        }
       }
-    }
 
-    this.logger.log(`Total fetched emails: ${allEmails.length}`);
-    return allEmails;
+      return finalEmails;
+    } catch (error) {
+      return [];
+    }
   }
 
   private async isPotentialLead(
-  email: GraphEmailResponse['value'][0],
-  orgId: string,
-): Promise<boolean> {
-  const excludedMailboxes = [
-    'jobalerts-noreply@linkedin.com',
-    'microsoftexchange329e71ec88ae4615bbc36ab6ce41109e@innoway-solutions.com',
-    'MicrosoftExchange329e71ec88ae4615bbc36ab6ce41109e@innoway-solutions.com',
-    'updates-noreply@linkedin.com',
-    'jobs-listings@linkedin.com',
-    'messages-noreply@linkedin.com',
-    'security-noreply@linkedin.com',
-  ];
+    email: GraphEmailResponse['value'][0],
+    orgId: string,
+  ): Promise<{ isLead: boolean; leadEmail?: string; phone?: string | null }> {
+    const senderEmail = email.from?.emailAddress?.address?.toLowerCase();
+    if (!senderEmail) {
+      return { isLead: false };
+    }
 
-  const senderEmail = email.from?.emailAddress?.address?.toLowerCase();
-  if (!senderEmail) {
-    this.logger.warn(`Email ${email.id} missing sender address, skipping`);
-    return false;
-  }
+    const leadConfig = await this.prisma.leadConfiguration.findUnique({
+      where: { orgId },
+      select: { filters: true, excludedEmails: true, specialEmails: true },
+    });
 
-  if (excludedMailboxes.includes(senderEmail)) {
-    this.logger.log(`Email ${email.id} from excluded mailbox ${senderEmail}, skipping`);
-    return false;
-  }
+    const excludedEmails = leadConfig?.excludedEmails || [];
+    if (excludedEmails.includes(senderEmail)) {
+      return { isLead: false };
+    }
 
-  const leadConfig = await this.prisma.leadConfiguration.findUnique({
-    where: { orgId },
-    select: { filters: true },
-  });
+    const specialEmails = leadConfig?.specialEmails || [];
+    let leadEmail = senderEmail;
+    if (specialEmails.includes(senderEmail)) {
+      const subject = email.subject || '';
+      const body = striptags(email.body?.content || email.bodyPreview || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+      const foundEmails = ((subject.match(emailRegex) as string[]) || [])
+        .concat((body.match(emailRegex) as string[]) || [])
+        .map((email) => email.toLowerCase())
+        .filter(
+          (email) =>
+            !excludedEmails.includes(email) && !specialEmails.includes(email),
+        );
+      leadEmail = foundEmails[0] || senderEmail;
+    }
 
-  if (!leadConfig) {
-    const defaultKeywords = [
+    const filters = leadConfig?.filters || [
       'inquiry',
       'interested',
       'quote',
@@ -657,21 +666,19 @@ export class LeadService {
       'meeting',
     ];
     const subject = email.subject.toLowerCase();
-    const preview = email.body?.content?.toLowerCase() || '';
-    return defaultKeywords.some(
-      (kw) =>
-        subject.includes(kw) ||
-        defaultKeywords.some((kw) => preview.includes(kw)),
+    const body = email.body?.content?.toLowerCase() || '';
+    const isLead = filters.some(
+      (kw) => subject.includes(kw) || body.includes(kw),
     );
-  }
 
-  const subject = email.subject.toLowerCase();
-  const preview = email.body?.content?.toLowerCase() || '';
-  return (
-    leadConfig.filters.some((kw) => subject.includes(kw)) ||
-    leadConfig.filters.some((kw) => preview.includes(kw))
-  );
-}
+    // Phone number extraction
+    const phoneRegex = /\b\+?[\d\s-]{8,}\b/g;
+    const phoneMatches =
+      body.match(phoneRegex) || subject.match(phoneRegex) || [];
+    const phone = phoneMatches[0] || null;
+
+    return { isLead, leadEmail, phone };
+  }
 
   private async uploadToCloudinary(
     fileName: string,
@@ -681,7 +688,7 @@ export class LeadService {
     try {
       const buffer = Buffer.from(content, 'base64');
       const stream = Readable.from(buffer);
-      const result = await new Promise<string>((resolve, reject) => {
+      return await new Promise<string>((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
           {
             resource_type: 'auto',
@@ -695,12 +702,7 @@ export class LeadService {
         );
         stream.pipe(uploadStream);
       });
-      this.logger.log(`Uploaded attachment ${fileName} to Cloudinary`);
-      return result;
     } catch (error) {
-      this.logger.error(
-        `Failed to upload ${fileName} to Cloudinary: ${error.message}`,
-      );
       throw error;
     }
   }
@@ -714,26 +716,26 @@ export class LeadService {
       contentType: string;
     }[],
   ) {
-    for (const attachment of attachments) {
-      try {
-        const cloudinaryUrl = await this.uploadToCloudinary(
-          attachment.name,
-          attachment.contentBytes,
-          attachment.contentType,
-        );
-        await this.prisma.leadAttachment.create({
-          data: {
-            conversationEmailId, // Updated field name
-            fileName: attachment.name,
-            cloudinaryUrl,
-          },
-        });
-      } catch (error) {
-        this.logger.error(
-          `Failed to process attachment ${attachment.name}: ${error.message}`,
-        );
-      }
-    }
+    await Promise.all(
+      attachments.map(async (attachment) => {
+        try {
+          const cloudinaryUrl = await this.uploadToCloudinary(
+            attachment.name,
+            attachment.contentBytes,
+            attachment.contentType,
+          );
+          await this.prisma.leadAttachment.create({
+            data: {
+              conversationEmailId,
+              fileName: attachment.name,
+              cloudinaryUrl,
+            },
+          });
+        } catch (error) {
+          // Skip failed attachments
+        }
+      }),
+    );
   }
 
   private async storeLeads(
@@ -744,7 +746,6 @@ export class LeadService {
   ) {
     const conversations = new Map<string, GraphEmailResponse['value'][0][]>();
 
-    // Group emails by conversation
     emails.forEach((email) => {
       if (!email.conversationId) return;
       if (!conversations.has(email.conversationId)) {
@@ -754,24 +755,32 @@ export class LeadService {
     });
 
     for (const [conversationId, conversationEmails] of conversations) {
-      const firstEmail = conversationEmails[0];
-      const senderEmail = firstEmail.from.emailAddress.address;
+      // Check all emails in the conversation for lead eligibility
+      let qualifyingEmail: GraphEmailResponse['value'][0] | undefined;
+      let leadResult:
+        | { isLead: boolean; leadEmail?: string; phone?: string | null }
+        | undefined;
 
-
-      if (!(await this.isPotentialLead(firstEmail, orgId))) continue;
-
-      let mailbox: Mailbox | undefined;
-    if (firstEmail.toRecipients?.length) {
-      for (const recipient of firstEmail.toRecipients) {
-        const recipientEmail = recipient.emailAddress.address.toLowerCase();
-        mailbox = mailboxes.find((m) => m.email.toLowerCase() === recipientEmail);
-        if (mailbox) break; 
+      for (const email of conversationEmails) {
+        const result = await this.isPotentialLead(email, orgId);
+        if (result.isLead) {
+          qualifyingEmail = email;
+          leadResult = result;
+          break;
+        }
       }
-    }
 
-    mailbox = mailbox || mailboxes[0];
+      if (!qualifyingEmail || !leadResult?.isLead) continue;
 
-      // Get full conversation thread
+      const mailbox = qualifyingEmail.toRecipients?.length
+        ? mailboxes.find((m) =>
+            qualifyingEmail.toRecipients!.some(
+              (r) =>
+                r.emailAddress.address.toLowerCase() === m.email.toLowerCase(),
+            ),
+          ) || mailboxes[0]
+        : mailboxes[0];
+
       let fullConversation: GraphEmailResponse['value'];
       try {
         fullConversation = await this.fetchConversationThread(
@@ -781,65 +790,53 @@ export class LeadService {
           token,
         );
       } catch (error) {
-        this.logger.error(
-          `Using initial emails for conversation ${conversationId}`,
-        );
         fullConversation = conversationEmails;
       }
 
-      // Sort chronologically
       fullConversation.sort(
         (a, b) =>
           new Date(a.receivedDateTime).getTime() -
           new Date(b.receivedDateTime).getTime(),
       );
 
-      
-
-      // Create/update lead
       const leadData = {
         organization: { connect: { id: orgId } },
         source: 'email',
         assignedTo: mailbox.assignedToId
           ? { connect: { user_id: mailbox.assignedToId } }
           : undefined,
-        name: firstEmail.from.emailAddress.name || 'Unknown',
-        email: senderEmail,
-        phone: null,
+        name: qualifyingEmail.from.emailAddress.name || 'Unknown',
+        email:
+          leadResult.leadEmail || qualifyingEmail.from.emailAddress.address,
+        phone: leadResult.phone,
         company: null,
         job_title: null,
         initialConversationId: conversationId,
         status: 'NEW' as LeadStatus,
-        created_at: new Date(firstEmail.receivedDateTime),
+        created_at: new Date(qualifyingEmail.receivedDateTime),
       };
 
-      // Use a transaction to ensure atomicity
       const lead = await this.prisma.$transaction(async (tx) => {
-        // Check for existing non-CLOSED leads with the same orgId and email
         const existingLead = await tx.lead.findFirst({
           where: {
             email: leadData.email,
             organization: { id: orgId },
-            status: { not: 'CLOSED' }, // Exclude CLOSED leads
+            status: { not: 'CLOSED' },
           },
-          include: {
-            conversations: {
-              select: { conversationId: true },
-            },
-          },
+          include: { conversations: { select: { conversationId: true } } },
         });
 
         if (existingLead) {
-          // Check if this conversation is already associated with the lead
-          const hasConversation = existingLead.conversations.some(
-            (conv) => conv.conversationId === conversationId,
-          );
-          if (!hasConversation) {
-            // Update the existing lead and associate the new conversation later
+          if (
+            !existingLead.conversations.some(
+              (conv) => conv.conversationId === conversationId,
+            )
+          ) {
             return await tx.lead.update({
               where: { lead_id: existingLead.lead_id },
               data: {
                 name: leadData.name,
+                phone: leadData.phone,
                 assignedTo: leadData.assignedTo,
                 status: leadData.status,
                 created_at: leadData.created_at,
@@ -847,80 +844,51 @@ export class LeadService {
               },
             });
           }
-          // If the conversation already exists, return the lead without updating
           return existingLead;
-        } else {
-          // No non-CLOSED lead exists, create a new lead
-          return await tx.lead.create({
-            data: leadData,
-          });
         }
+        return await tx.lead.create({ data: leadData });
       });
-
-      // Create or update conversation
-      const conversationData = {
-        lead: { connect: { lead_id: lead.lead_id } },
-        conversationId,
-      };
 
       const existingConversation = await this.prisma.leadConversation.findFirst(
         {
           where: { conversationId },
-          include: {
-            lead: {
-              select: { status: true },
-            },
-          },
+          include: { lead: { select: { status: true } } },
         },
       );
 
-      let conversation;
-      if (existingConversation) {
-        if (existingConversation.lead.status === 'CLOSED') {
-          // If the conversation belongs to a CLOSED lead, create a new conversation
-          conversation = await this.prisma.leadConversation.create({
+      const conversation = await (async () => {
+        const conversationData = {
+          lead: { connect: { lead_id: lead.lead_id } },
+          conversationId,
+        };
+        if (!existingConversation) {
+          return await this.prisma.leadConversation.create({
             data: conversationData,
           });
-          this.logger.log(
-            `Created new conversation for lead ${lead.lead_id} with conversationId ${conversationId} (existing conversation belongs to CLOSED lead)`,
-          );
-        } else {
-          // If the conversation belongs to a non-CLOSED lead, update it if necessary
-          if (existingConversation.leadId !== lead.lead_id) {
-            conversation = await this.prisma.leadConversation.update({
-              where: { id: existingConversation.id },
-              data: conversationData,
-            });
-            this.logger.log(
-              `Updated conversation ${existingConversation.id} to point to lead ${lead.lead_id}`,
-            );
-          } else {
-            conversation = existingConversation;
-            this.logger.log(
-              `Reusing existing conversation ${conversation.id} for lead ${lead.lead_id}`,
-            );
-          }
         }
-      } else {
-        // No existing conversation, create a new one
-        conversation = await this.prisma.leadConversation.create({
-          data: conversationData,
-        });
-        this.logger.log(
-          `Created new conversation ${conversation.id} for lead ${lead.lead_id}`,
-        );
-      }
+        if (existingConversation.lead.status === 'CLOSED') {
+          return await this.prisma.leadConversation.create({
+            data: conversationData,
+          });
+        }
+        if (existingConversation.leadId !== lead.lead_id) {
+          return await this.prisma.leadConversation.update({
+            where: { id: existingConversation.id },
+            data: { lead: { connect: { lead_id: lead.lead_id } } },
+          });
+        }
+        return existingConversation;
+      })();
 
-      // Process all emails in conversation
       for (const [index, email] of fullConversation.entries()) {
         const existingEmail = await this.prisma.conversationEmail.findUnique({
           where: { emailId: email.id },
         });
-
         if (existingEmail) continue;
 
-        const isIncoming = email.from?.emailAddress?.address === senderEmail;
-
+        const isIncoming =
+          email.from?.emailAddress?.address.toLowerCase() ===
+          leadData.email.toLowerCase();
         const conversationEmail = await this.prisma.conversationEmail.create({
           data: {
             conversation: { connect: { id: conversation.id } },
@@ -955,7 +923,6 @@ export class LeadService {
           },
         });
 
-        // Process attachments using the ConversationEmail's ID
         if (email.hasAttachments && email.attachments?.length) {
           await this.processEmailAttachments(
             conversationEmail.id,
@@ -963,7 +930,6 @@ export class LeadService {
           );
         }
 
-        // Add a small delay between processing emails
         await this.delay(200);
       }
     }
@@ -990,14 +956,11 @@ export class LeadService {
         syncValidation.sharedMailbox!,
         token,
       );
-
       const emails = await this.fetchEmails(orgId, mailboxes, token);
-
       await this.storeLeads(orgId, emails, mailboxes, token);
 
       return { needsAuth: false, message: 'Sync Successful' };
     } catch (error) {
-      this.logger.error('Sync failed: ', error.message, error.response?.data);
       return {
         needsAuth: true,
         authUrl: 'http://localhost:5000/auth/microsoft/leads',
@@ -1005,116 +968,233 @@ export class LeadService {
     }
   }
 
-  async updateLeadConfig(
+  async listMailboxFolders(
     orgId: string,
-    data: {
-      filters?: string[];
-      folders?: Record<string, string>;
-      syncInterval?: string;
-    },
-  ) {
-    const org = await this.prisma.organization.findUnique({
-      where: { id: orgId },
-      include: { leadConfig: true },
-    });
-    if (!org)
-      throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
-
-    let updatedLeadConfig;
-
-    if (!org.leadConfig) {
-      updatedLeadConfig = await this.prisma.leadConfiguration.create({
-        data: {
-          orgId,
-          filters: data.filters || [
-            'inquiry',
-            'interested',
-            'quote',
-            'sales',
-            'meeting',
-          ],
-          folders: data.folders || { inbox: 'Inbox', junkemail: 'Junk' },
-          syncInterval: data.syncInterval || 'EVERY_HOUR',
-        },
-      });
-      await this.scheduleOrgSync(orgId, updatedLeadConfig.syncInterval);
-    } else {
-      const previousSyncInterval = org.leadConfig.syncInterval;
-      updatedLeadConfig = await this.prisma.leadConfiguration.update({
-        where: { orgId },
-        data: {
-          filters: data.filters !== undefined ? data.filters : undefined,
-          folders: data.folders !== undefined ? data.folders : undefined,
-          syncInterval:
-            data.syncInterval !== undefined ? data.syncInterval : undefined,
-        },
-      });
-
-      if (data.syncInterval && data.syncInterval !== previousSyncInterval) {
-        await this.scheduleOrgSync(orgId, updatedLeadConfig.syncInterval);
-      }
+    mailboxEmail: string,
+  ): Promise<Folder[]> {
+    const credResult = await this.getPlatformCredentials(orgId);
+    if (credResult.needsAuth || !credResult.creds?.access_token) {
+      throw new HttpException('Credentials required', HttpStatus.UNAUTHORIZED);
     }
 
-    return updatedLeadConfig;
+    try {
+    const tokenPayload = JSON.parse(
+      Buffer.from(credResult.creds.access_token.split('.')[1], 'base64').toString(),
+    );
+    this.logger.log(`Token payload for ${mailboxEmail}: ${tokenPayload}`);
+    this.logger.log(`Token scopes for ${mailboxEmail}: ${tokenPayload.scp}`);
+  } catch (e) {
+    this.logger.error(`Failed to decode token: ${e.message}`);
   }
 
-  async setupLeadSync(
-    orgId: string,
-    userId: string,
-    data: {
-      sharedMailbox: string;
-      filters?: string[];
-      folders?: Record<string, string>;
-      syncInterval?: string;
-    },
-  ) {
-    const user = await this.prisma.user.findUnique({
-      where: { user_id: userId },
-    });
-    if (!user || user.role !== 'ADMIN') {
-      throw new HttpException(
-        'Only admins can setup lead sync',
-        HttpStatus.FORBIDDEN,
+    try {
+      const response = await this.limiter.schedule(() =>
+        axios.get<{
+          value: { id: string; displayName: string; wellKnownName?: string }[];
+        }>(
+          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailboxEmail)}/mailFolders`,
+          {
+            headers: {
+              Authorization: `Bearer ${credResult.creds!.access_token}`,
+            },
+          },
+        ),
       );
-    }
 
-    await this.prisma.$transaction(async (prisma) => {
+      const folders: Folder[] = response.data.value.map((f) => ({
+        id: f.id,
+        name: f.displayName,
+      }));
+
+      if (folders.length === 0) {
+        const inboxResponse = await this.limiter.schedule(() =>
+          axios.get<{ id: string; displayName: string }>(
+            `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailboxEmail)}/mailFolders/inbox`,
+            {
+              headers: {
+                Authorization: `Bearer ${credResult.creds!.access_token}`,
+              },
+            },
+          ),
+        );
+        folders.push({
+          id: inboxResponse.data.id,
+          name: inboxResponse.data.displayName || 'Inbox',
+        });
+      }
+
+      return folders;
+    } catch (error) {
+      this.logger.error(
+    `Failed to fetch folders for ${mailboxEmail}: ${error.message}`,
+    JSON.stringify(error.response?.data, null, 2),
+  );
+      throw new HttpException(
+    `Failed to fetch folders for ${mailboxEmail}: ${error.response?.data?.error?.message || error.message}`,
+    HttpStatus.BAD_REQUEST,
+  );
+    }
+  }
+
+  async updateLeadConfig(
+  orgId: string,
+  data: {
+    filters?: string[];
+    folders?: Record<string, string[]>;
+    syncInterval?: string;
+    excludedEmails?: string[];
+    specialEmails?: string[];
+    sharedMailbox?: string;
+  },
+) {
+  const org = await this.prisma.organization.findUnique({
+    where: { id: orgId },
+    include: { leadConfig: true },
+  });
+  if (!org) {
+    throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
+  }
+
+  let validatedFolders: Record<string, { id: string; name: string }[]> | undefined;
+  if (data.folders) {
+    validatedFolders = {};
+    for (const [mailboxEmail, folderIds] of Object.entries(data.folders)) {
+      try {
+        const availableFolders = await this.listMailboxFolders(orgId, mailboxEmail);
+        const validFolders = folderIds
+          .map((id) => {
+            const folder = availableFolders.find((f) => f.id === id);
+            return folder ? { id: folder.id, name: folder.name } : null;
+          })
+          .filter((f): f is { id: string; name: string } => f !== null);
+        validatedFolders[mailboxEmail.toLowerCase()] =
+          validFolders.length > 0
+            ? validFolders
+            : [{ id: 'inbox', name: 'Inbox' }]; // Default to Inbox
+      } catch (error) {
+        validatedFolders[mailboxEmail.toLowerCase()] = [{ id: 'inbox', name: 'Inbox' }];
+      }
+    }
+  }
+
+  let updatedLeadConfig;
+
+  await this.prisma.$transaction(async (prisma) => {
+    if (data.sharedMailbox !== undefined) {
       await prisma.organization.update({
         where: { id: orgId },
         data: { sharedMailbox: data.sharedMailbox },
       });
+    }
 
-      await prisma.leadConfiguration.upsert({
-        where: { orgId },
-        create: {
+    if (!org.leadConfig) {
+      updatedLeadConfig = await prisma.leadConfiguration.create({
+        data: {
           orgId,
-          filters: data.filters || [
-            'inquiry',
-            'interested',
-            'quote',
-            'sales',
-            'meeting',
-          ],
-          folders: data.folders || { inbox: 'Inbox', junkemail: 'Junk' },
+          filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
+          folders: validatedFolders || {
+            [org.sharedMailbox?.toLowerCase() || 'inbox']: [{ id: 'inbox', name: 'Inbox' }],
+          },
           syncInterval: data.syncInterval || 'EVERY_HOUR',
-        },
-        update: {
-          filters: data.filters || [
-            'inquiry',
-            'interested',
-            'quote',
-            'sales',
-            'meeting',
-          ],
-          folders: data.folders || { inbox: 'Inbox', junkemail: 'Junk' },
-          syncInterval: data.syncInterval || 'EVERY_HOUR',
+          excludedEmails: data.excludedEmails || [],
+          specialEmails: data.specialEmails || [],
         },
       });
+    } else {
+      updatedLeadConfig = await prisma.leadConfiguration.update({
+        where: { orgId },
+        data: {
+          filters: data.filters !== undefined ? data.filters : undefined,
+          folders: validatedFolders !== undefined ? validatedFolders : undefined,
+          syncInterval: data.syncInterval !== undefined ? data.syncInterval : undefined,
+          excludedEmails: data.excludedEmails !== undefined ? data.excludedEmails : undefined,
+          specialEmails: data.specialEmails !== undefined ? data.specialEmails : undefined,
+        },
+      });
+
+      if (data.syncInterval !== undefined || !this.jobs.has(orgId)) {
+        this.logger.log(`Rescheduling sync for org ${orgId} due to config update`);
+        await this.scheduleOrgSync(orgId, updatedLeadConfig.syncInterval);
+      }
+    }
+  });
+
+  return { ...updatedLeadConfig, folders: validatedFolders || updatedLeadConfig.folders };
+}
+
+  async setupLeadSync(
+  orgId: string,
+  userId: string,
+  data: {
+    sharedMailbox: string;
+    filters?: string[];
+    folders?: Record<string, string[]>;
+    syncInterval?: string;
+    excludedEmails?: string[];
+    specialEmails?: string[];
+  },
+) {
+  const user = await this.prisma.user.findUnique({
+    where: { user_id: userId },
+  });
+  if (!user || user.role !== 'ADMIN') {
+    throw new HttpException('Only admins can setup lead sync', HttpStatus.FORBIDDEN);
+  }
+
+  let validatedFolders: Record<string, { id: string; name: string }[]> = {};
+  if (data.folders) {
+    for (const [mailboxEmail, folderIds] of Object.entries(data.folders)) {
+      try {
+        const availableFolders = await this.listMailboxFolders(orgId, mailboxEmail);
+        const validFolders = folderIds
+          .map((id) => {
+            const folder = availableFolders.find((f) => f.id === id);
+            return folder ? { id: folder.id, name: folder.name } : null;
+          })
+          .filter((f): f is { id: string; name: string } => f !== null);
+        validatedFolders[mailboxEmail.toLowerCase()] =
+          validFolders.length > 0
+            ? validFolders
+            : [{ id: 'inbox', name: 'Inbox' }];
+      } catch (error) {
+        validatedFolders[mailboxEmail.toLowerCase()] = [{ id: 'inbox', name: 'Inbox' }];
+      }
+    }
+  } else {
+    validatedFolders = {
+      [data.sharedMailbox.toLowerCase()]: [{ id: 'inbox', name: 'Inbox' }],
+    };
+  }
+
+  await this.prisma.$transaction(async (prisma) => {
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: { sharedMailbox: data.sharedMailbox },
     });
 
-    this.logger.log(`Lead sync setup completed for org ${orgId}`);
-    return { message: 'Lead sync setup successful' };
-  }
+    await prisma.leadConfiguration.upsert({
+      where: { orgId },
+      create: {
+        orgId,
+        filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
+        folders: validatedFolders,
+        syncInterval: data.syncInterval || 'EVERY_HOUR',
+        excludedEmails: data.excludedEmails || [],
+        specialEmails: data.specialEmails || [],
+      },
+      update: {
+        filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
+        folders: validatedFolders,
+        syncInterval: data.syncInterval || 'EVERY_HOUR',
+        excludedEmails: data.excludedEmails || [],
+        specialEmails: data.specialEmails || [],
+      },
+    });
+  });
+
+  this.logger.log(`Lead sync setup completed for org ${orgId}`);
+  return { message: 'Lead sync setup successful', folders: validatedFolders };
+}
 
   async connectLeadSync(userId: string) {
     this.logger.log(
@@ -1326,36 +1406,6 @@ export class LeadService {
     return { message: 'Member Microsoft lead sync disconnected' };
   }
 
-  private async startDynamicSync() {
-    this.logger.log('Starting dynamic sync for organizations');
-
-    try {
-      const organizations = await this.prisma.organization.findMany({
-        select: {
-          id: true,
-          leadConfig: {
-            select: { syncInterval: true },
-          },
-          preferences: {
-            select: { leadSyncEnabled: true },
-          },
-        },
-      });
-      this.logger.log(`Found ${organizations.length} organizations to sync`);
-      for (const org of organizations) {
-        if (org.preferences?.leadSyncEnabled) {
-          await this.scheduleOrgSync(org.id, org.leadConfig?.syncInterval);
-        }
-      }
-    } catch (error) {
-      this.logger.error(
-        'Error starting dynamic sync: ',
-        error.message,
-        error.stack,
-      );
-    }
-  }
-
   async scheduleOrgSync(orgId: string, syncInterval?: string) {
     const preferences = await this.prisma.microsoftPreferences.findUnique({
       where: { orgId },
@@ -1371,6 +1421,7 @@ export class LeadService {
     const existingJob = this.jobs.get(orgId);
     if (existingJob) {
       existingJob.cancel();
+      this.jobs.delete(orgId);
       this.logger.log(`Cancelled old sync job for org ${orgId}`);
     }
 
@@ -1382,16 +1433,62 @@ export class LeadService {
     );
 
     const job = schedule.scheduleJob(cronExpression, async () => {
-      this.logger.log(`Syncing leads for org ${orgId}`);
-      const result = await this.fetchAndStoreLeads(orgId);
-      if (result?.needsAuth) {
-        this.logger.warn(`Org ${orgId} needs to re-authenticate`);
-      } else {
-        this.logger.log(`Sync completed for org ${orgId}`);
+      // Prevent concurrent syncs
+      if (this.runningSyncs.has(orgId)) {
+        this.logger.warn(`Sync already running for org ${orgId}, skipping`);
+        return;
+      }
+
+      this.runningSyncs.add(orgId);
+      this.logger.log(`Starting sync for org ${orgId}`);
+      try {
+        const result = await this.fetchAndStoreLeads(orgId);
+        if (result?.needsAuth) {
+          this.logger.warn(`Org ${orgId} needs to re-authenticate`);
+        } else {
+          this.logger.log(`Sync completed for org ${orgId}`);
+        }
+      } catch (error) {
+        this.logger.error(`Sync failed for org ${orgId}: ${error.message}`);
+      } finally {
+        this.runningSyncs.delete(orgId);
       }
     });
-
     this.jobs.set(orgId, job);
+  }
+
+  private async startDynamicSync() {
+    this.logger.log('Starting dynamic sync for single-org');
+    try {
+      const org = await this.prisma.organization.findUnique({
+        where: { id: 'single-org' },
+        select: {
+          id: true,
+          leadConfig: {
+            select: { syncInterval: true },
+          },
+          preferences: {
+            select: { leadSyncEnabled: true },
+          },
+        },
+      });
+
+      if (!org) {
+        this.logger.warn('Organization single-org not found');
+        return;
+      }
+
+      this.logger.log('Found organization single-org to sync');
+      if (org.preferences?.leadSyncEnabled && !this.jobs.has(org.id)) {
+        await this.scheduleOrgSync(org.id, org.leadConfig?.syncInterval);
+      }
+    } catch (error) {
+      this.logger.error(
+        'Error starting dynamic sync: ',
+        error.message,
+        error.stack,
+      );
+    }
   }
 
   async fetchLeadsByUserId(
@@ -1518,6 +1615,69 @@ export class LeadService {
       );
     }
   }
+
+  async fetchAllLeadsByUserId(orgId: string, userId: string) {
+    this.logger.log(
+      `Fetching all leads for userId: ${userId}, orgId: ${orgId}`,
+    );
+
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { user_id: userId },
+        select: { role: true },
+      });
+      if (!user)
+        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+
+      // Base where clause based on user role
+      const baseWhereClause: Prisma.LeadWhereInput =
+        user.role === 'ADMIN'
+          ? { orgId }
+          : {
+              orgId,
+              OR: [{ assignedToId: userId }, { assignedToId: null }],
+            };
+
+      const leads = await this.prisma.lead.findMany({
+        where: baseWhereClause,
+        orderBy: { created_at: 'desc' },
+        include: {
+          assignedTo: {
+            select: {
+              user_id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+        },
+      });
+
+      this.logger.log(`Fetched ${leads.length} leads for userId: ${userId}`);
+
+      return {
+        leads: leads.map((lead) => ({
+          leadId: lead.lead_id,
+          source: lead.source,
+          name: lead.name,
+          email: lead.email,
+          phone: lead.phone,
+          company: lead.company,
+          jobTitle: lead.job_title,
+          status: lead.status,
+          assignedTo: lead.assignedTo,
+          createdAt: lead.created_at,
+        })),
+      };
+    } catch (error) {
+      this.logger.error('Error fetching all leads: ', error.message);
+      throw new HttpException(
+        'Failed to fetch all leads',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
   async fetchLeadConversation(leadId: string) {
     this.logger.log(`Fetching conversation for leadId: ${leadId}`);
 

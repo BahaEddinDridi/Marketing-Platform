@@ -37,4 +37,14 @@ export class CampaignsController {
   remove(@Param('id') id: string) {
     return this.campaignsService.remove(id);
   }
+
+
+  @Post('linkedin/fetch')
+  @UseGuards(JwtAuthGuard)
+  async fetchLinkedInCampaigns(@Body('adAccountIds') adAccountIds: string | string[]) {
+    const ids = Array.isArray(adAccountIds) ? adAccountIds : [adAccountIds];
+    const campaigns = await this.campaignsService.fetchLinkedInCampaigns(ids);
+    console.log('Fetched LinkedIn Campaigns:', JSON.stringify(campaigns, null, 2));
+    return { success: true, campaigns };
+  }
 }

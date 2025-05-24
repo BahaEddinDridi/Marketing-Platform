@@ -60,11 +60,12 @@ model LinkedInPage {
   email          String
   websiteURL     String?
   description    String?
-  logo           Json?        // Stores logoV2 { cropped, original, cropInfo }
-  coverPhoto     String?        // Stores coverPhotoV2 { cropped, original, cropInfo }
-  staffCount     String?      // e.g., SIZE_11_TO_50
-  specialties    String[]    // Array of specialties
-  address        Json?        // Stores address { country, city, geoLocation, streetAddressFieldState }
+  logo           Json?
+  coverPhoto     String?
+  staffCount     String?
+  specialties    String[]
+  address        Json?
+  adAccounts     Json         @default("[]")
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id])
@@ -92,14 +93,16 @@ model LinkedInPreferences {
 }
 
 model LeadConfiguration {
-  id           String       @id @default(uuid())
-  orgId        String       @unique @default("single-org")
-  organization Organization @relation("OrgToLeadConfig", fields: [orgId], references: [id])
-  filters      String[]     @default(["inquiry", "interested", "quote", "sales", "meeting"])
-  folders      Json         @default("{\"inbox\": \"Inbox\", \"junkemail\": \"Junk\"}")
-  syncInterval String       @default("EVERY_HOUR")
-  created_at   DateTime     @default(now())
-  updated_at   DateTime     @updatedAt
+  id             String       @id @default(uuid())
+  orgId          String       @unique @default("single-org")
+  organization   Organization @relation("OrgToLeadConfig", fields: [orgId], references: [id])
+  filters        String[]     @default(["inquiry", "interested", "quote", "sales", "meeting"])
+  folders        Json         // Format: { "[mailboxEmail]": ["folderId1", "folderId2"], ... }, e.g., {"shared@example.com": ["inbox", "junkemail"]}
+  syncInterval   String       @default("EVERY_HOUR")
+  excludedEmails String[]     @default([])
+  specialEmails  String[]     @default([])
+  created_at     DateTime     @default(now())
+  updated_at     DateTime     @updatedAt
 }
 
 model User {
@@ -319,20 +322,63 @@ enum CampaignStatus {
   ACTIVE
   PAUSED
   COMPLETED
+  DRAFT
+  ARCHIVED
+}
+
+enum CampaignObjective {
+  LEAD_GENERATION
+  BRAND_AWARENESS
+  WEBSITE_VISIT
+  ENGAGEMENT
+  CONVERSIONS
+  APP_INSTALLS
+  VIDEO_VIEWS
+  REACH
+}
+
+enum CampaignType {
+  SPONSORED_UPDATES
+  SPONSORED_CONTENT
+  TEXT_AD
+  DYNAMIC_AD
+  VIDEO_AD
+  DISPLAY_AD
+  SEARCH_AD
+}
+
+enum CostType {
+  CPM
+  CPC
+  CPA
 }
 
 model MarketingCampaign {
-  campaign_id   String                @id @default(uuid())
-  campaign_name String
-  platform      MarketingPlatform?    @relation(fields: [platform_id], references: [platform_id])
-  platform_id   String?
-  budget        Float
-  start_date    DateTime
-  end_date      DateTime?
-  status        CampaignStatus        @default(ACTIVE)
-  performances  CampaignPerformance[]
-  created_at    DateTime              @default(now())
-  updated_at    DateTime              @updatedAt
+  campaign_id        String                @id @default(uuid())
+  campaign_name      String
+  platform           MarketingPlatform?    @relation(fields: [platform_id], references: [platform_id])
+  platform_id        String?
+  external_id        String?               @unique
+  ad_account_id      String?
+  campaign_group_id  String?
+  objective          CampaignObjective?
+  type               CampaignType?
+  format             String?
+  status             CampaignStatus        @default(ACTIVE)
+  serving_statuses   String[]
+  budget             Float?
+  total_budget       Float?
+  unit_cost          Float?
+  cost_type          CostType?
+  start_date         DateTime
+  end_date           DateTime?
+  audience_expansion Boolean               @default(false)
+  pacing_strategy    String?
+  locale             String?
+  created_at         DateTime              @default(now())
+  updated_at         DateTime              @updatedAt
+  performances       CampaignPerformance[]
+  data               Json?
 }
 
 model Campaign {
@@ -356,6 +402,9 @@ model CampaignPerformance {
   conversions    Int               @default(0)
   cost           Float
   roi            Float
+  leads          Int               @default(0)
+  reach          Int               @default(0)
   date           DateTime
   created_at     DateTime          @default(now())
+  updated_at     DateTime          @updatedAt
 }

@@ -10,9 +10,14 @@ export const LinkedInPageStrategyProvider: Provider = {
     linkedInService: LinkedInService,
     prisma: PrismaService,
   ) => {
-    const config = await linkedInService.getLinkedInCredentials();
-    const authConfigService = new LinkedInAuthConfigService(config.clientId, config.clientSecret);
-    return new LinkedInPageStrategy(linkedInService, authConfigService, prisma);
+    try {
+      const config = await linkedInService.getLinkedInCredentials();
+      const authConfigService = new LinkedInAuthConfigService(config.clientId, config.clientSecret);
+      return new LinkedInPageStrategy(linkedInService, authConfigService, prisma);
+    } catch (error) {
+      console.warn('Skipping LinkedInPageStrategy initialization: No credentials available');
+      return null; // Skip strategy initialization
+    }
   },
   inject: [LinkedInService, PrismaService],
 };
