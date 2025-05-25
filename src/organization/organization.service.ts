@@ -22,11 +22,35 @@ export class OrganizationService {
   }
 
   async getOrganization(orgId: string) {
-    return this.prisma.organization.findUnique({
-      where: { id: orgId },
-      include: { leadConfig: true },
-    });
+  const organization = await this.prisma.organization.findUnique({
+    where: { id: orgId },
+    include: { leadConfig: true },
+  });
+
+  if (!organization) {
+    return null;
   }
+
+  // Format leadConfig.folders for frontend
+  const formattedLeadConfig = organization.leadConfig
+    ? {
+        ...organization.leadConfig,
+        folders: Object.fromEntries(
+          Object.entries(organization.leadConfig.folders || {}).map(([email, folders]) => [
+            email.toLowerCase(),
+            Array.isArray(folders)
+              ? folders.filter((f: any) => f && typeof f === 'object' && 'id' in f && 'name' in f)
+              : [],
+          ]),
+        ),
+      }
+    : null;
+
+  return {
+    ...organization,
+    leadConfig: formattedLeadConfig,
+  };
+}
 
   async updateOrganization(
     orgId: string,

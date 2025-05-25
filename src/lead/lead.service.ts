@@ -94,12 +94,6 @@ export class LeadService {
   private jobs = new Map<string, schedule.Job>();
   private runningSyncs = new Set<string>();
   private readonly platformName = 'Microsoft';
-  private readonly scopes = [
-    'Mail.Read',
-    'Mail.Send',
-    'User.Read.All',
-    'Directory.Read.All',
-  ];
   private readonly limiter = new Bottleneck({
     maxConcurrent: 10, // Allow up to 10 concurrent requests
     minTime: 100, // Minimum 100ms between requests (adjust based on rate limits)
@@ -154,14 +148,143 @@ export class LeadService {
     return { valid: true, sharedMailbox: org.sharedMailbox };
   }
 
-  private async getPlatformCredentials(orgId: string) {
+  private async getMicrosoftToken(orgId: string) {
+    this.logger.log(`Fetching Microsoft app token for org ${orgId}`);
+
+    let clientId = this.configService.get('CLIENT_ID');
+    let clientSecret = this.configService.get('CLIENT_SECRET');
+    let tenantId = this.configService.get('TENANT_ID');
+
+    try {
+      const entraCreds = await this.authService.getEntraCredentials();
+      if (entraCreds) {
+        clientId = entraCreds.clientId;
+        clientSecret = entraCreds.clientSecret;
+        tenantId = entraCreds.tenantId;
+        this.logger.log(`Using Entra credentials for org ${orgId}`);
+      } else {
+        this.logger.warn(
+          `No Entra credentials found for org ${orgId}, falling back to .env`,
+        );
+      }
+
+      if (!clientId || !clientSecret || !tenantId) {
+        throw new Error('Missing Entra ID credentials');
+      }
+
+      const response = await axios.post<{
+        access_token: string;
+        expires_in: number;
+      }>(
+        `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+        new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          scope: 'https://graph.microsoft.com/.default',
+          grant_type: 'client_credentials',
+        }).toString(),
+        {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        },
+      );
+
+      const { access_token, expires_in } = response.data;
+
+      await this.updateMicrosoftCredentials(
+        orgId,
+        access_token,
+        expires_in,
+        ['Mail.Read', 'Mail.Send', 'User.Read.All'],
+        'LEADS',
+      );
+
+      this.logger.log(`App token acquired for org ${orgId}`);
+      return access_token;
+    } catch (error) {
+      this.logger.error(`Failed to get app token: ${error.message}`);
+      throw new Error('Failed to acquire application token');
+    }
+  }
+
+  private async updateMicrosoftCredentials(
+    orgId: string,
+    accessToken: string,
+    expiresIn: number,
+    scopes: string[],
+    type: 'LEADS',
+  ) {
+    this.logger.log(
+      `Updating Microsoft credentials for org ${orgId}, type: ${type}`,
+    );
+
+    const platform = await this.prisma.marketingPlatform.upsert({
+      where: {
+        orgId_platform_name: {
+          orgId,
+          platform_name: this.platformName,
+        },
+      },
+      create: {
+        orgId,
+        platform_name: this.platformName,
+        sync_status: 'CONNECTED',
+      },
+      update: {
+        sync_status: 'CONNECTED',
+      },
+    });
+
+    const existingCredentials = await this.prisma.platformCredentials.findFirst(
+      {
+        where: {
+          platform_id: platform.platform_id,
+          user_id: null,
+          type,
+        },
+      },
+    );
+
+    if (existingCredentials) {
+      await this.prisma.platformCredentials.update({
+        where: { credential_id: existingCredentials.credential_id },
+        data: {
+          access_token: accessToken,
+          refresh_token: null,
+          scopes,
+          expires_at: new Date(Date.now() + expiresIn * 1000),
+        },
+      });
+    } else {
+      await this.prisma.platformCredentials.create({
+        data: {
+          platform_id: platform.platform_id,
+          user_id: null,
+          type,
+          access_token: accessToken,
+          refresh_token: null,
+          scopes,
+          expires_at: new Date(Date.now() + expiresIn * 1000),
+        },
+      });
+    }
+
+    this.logger.log(`Credentials updated for org ${orgId}, type: ${type}`);
+  }
+
+  private async getPlatformCredentials(
+    orgId: string,
+  ): Promise<{ access_token: string; scopes: string[] }> {
     const platform = await this.prisma.marketingPlatform.findFirst({
       where: { orgId, platform_name: this.platformName },
     });
 
     if (!platform) {
+      this.logger.log(
+        `No marketing platform found for org ${orgId}, creating token`,
+      );
       return {
-        needsAuth: true,
+        access_token: await this.getMicrosoftToken(orgId),
+        scopes: ['Mail.Read', 'Mail.Send', 'User.Read.All'],
       };
     }
 
@@ -173,18 +296,19 @@ export class LeadService {
       },
     });
 
-    if (!creds) {
-      return { needsAuth: true };
-    }
-
-    // Check if token is still valid
     const isExpired =
-      creds.expires_at && new Date(creds.expires_at) < new Date();
-    if (!isExpired && creds.access_token) {
-      return { creds, needsAuth: false };
+      creds?.expires_at && new Date(creds.expires_at) < new Date();
+    if (!creds || isExpired || !creds.access_token) {
+      this.logger.log(
+        `Token missing, expired, or invalid for org ${orgId}, refreshing`,
+      );
+      return {
+        access_token: await this.getMicrosoftToken(orgId),
+        scopes: ['Mail.Read', 'Mail.Send', 'User.Read.All'],
+      };
     }
 
-    return { creds, needsAuth: true };
+    return { access_token: creds.access_token, scopes: creds.scopes };
   }
 
   private async getMailboxes(
@@ -238,86 +362,96 @@ export class LeadService {
   }
 
   private async getFolders(
-  orgId: string,
-  token: string,
-  mailboxEmail: string,
-): Promise<Folder[]> {
-  const leadConfig = await this.prisma.leadConfiguration.findUnique({
-    where: { orgId },
-  });
+    orgId: string,
+    token: string,
+    mailboxEmail: string,
+  ): Promise<Folder[]> {
+    const leadConfig = await this.prisma.leadConfiguration.findUnique({
+      where: { orgId },
+    });
 
-  const configuredFolders: Record<string, { id: string; name: string }[]> =
-    (leadConfig?.folders as Record<string, { id: string; name: string }[]>) || {};
-  const mailboxFolders = configuredFolders[mailboxEmail.toLowerCase()] || [];
+    const configuredFolders: Record<string, { id: string; name: string }[]> =
+      (leadConfig?.folders as Record<string, { id: string; name: string }[]>) ||
+      {};
+    const mailboxFolders = configuredFolders[mailboxEmail.toLowerCase()] || [];
 
-  if (mailboxFolders.length > 0) {
-    try {
-      const batchRequest = {
-        requests: mailboxFolders.map((folder, i) => ({
-          id: `folder_${i}`,
-          method: 'GET',
-          url: `/users/${encodeURIComponent(mailboxEmail)}/mailFolders/${folder.id}`,
-        })),
-      };
-      const response = await this.limiter.schedule(() =>
-        axios.post<{
-          responses: { id: string; status: number; body: { id: string; displayName: string } }[];
-        }>('https://graph.microsoft.com/v1.0/$batch', batchRequest, {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-      );
+    if (mailboxFolders.length > 0) {
+      try {
+        const batchRequest = {
+          requests: mailboxFolders.map((folder, i) => ({
+            id: `folder_${i}`,
+            method: 'GET',
+            url: `/users/${encodeURIComponent(mailboxEmail)}/mailFolders/${folder.id}`,
+          })),
+        };
+        const response = await this.limiter.schedule(() =>
+          axios.post<{
+            responses: {
+              id: string;
+              status: number;
+              body: { id: string; displayName: string };
+            }[];
+          }>('https://graph.microsoft.com/v1.0/$batch', batchRequest, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        );
 
-      const validFolders: Folder[] = response.data.responses
-        .map((res, i) => {
-          if (res.status < 400) {
-            return {
-              id: mailboxFolders[i].id,
-              name: mailboxFolders[i].name, // Use stored name
-            };
-          }
-          return null;
-        })
-        .filter((folder): folder is Folder => folder !== null);
+        const validFolders: Folder[] = response.data.responses
+          .map((res, i) => {
+            if (res.status < 400) {
+              return {
+                id: mailboxFolders[i].id,
+                name: mailboxFolders[i].name, // Use stored name
+              };
+            }
+            return null;
+          })
+          .filter((folder): folder is Folder => folder !== null);
 
-      if (validFolders.length > 0) {
-        return validFolders;
+        if (validFolders.length > 0) {
+          return validFolders;
+        }
+      } catch (error) {
+        // Fall through to fetch fresh folders
       }
-    } catch (error) {
-      // Fall through to fetch fresh folders
     }
+
+    // Fetch fresh folders if none configured or validation failed
+    const freshFolders = await this.listMailboxFolders(orgId, mailboxEmail);
+
+    // Update LeadConfiguration with fresh folders
+    await this.prisma.leadConfiguration.upsert({
+      where: { orgId },
+      update: {
+        folders: {
+          ...configuredFolders,
+          [mailboxEmail.toLowerCase()]: freshFolders.map((f) => ({
+            id: f.id,
+            name: f.name,
+          })),
+        },
+      },
+      create: {
+        orgId,
+        folders: {
+          [mailboxEmail.toLowerCase()]: freshFolders.map((f) => ({
+            id: f.id,
+            name: f.name,
+          })),
+        },
+        syncInterval: 'EVERY_HOUR',
+        filters: ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
+      },
+    });
+
+    return freshFolders;
   }
-
-  // Fetch fresh folders if none configured or validation failed
-  const freshFolders = await this.listMailboxFolders(orgId, mailboxEmail);
-
-  // Update LeadConfiguration with fresh folders
-  await this.prisma.leadConfiguration.upsert({
-    where: { orgId },
-    update: {
-      folders: {
-        ...configuredFolders,
-        [mailboxEmail.toLowerCase()]: freshFolders.map((f) => ({ id: f.id, name: f.name })),
-      },
-    },
-    create: {
-      orgId,
-      folders: {
-        [mailboxEmail.toLowerCase()]: freshFolders.map((f) => ({ id: f.id, name: f.name })),
-      },
-      syncInterval: 'EVERY_HOUR',
-      filters: ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
-    },
-  });
-
-  return freshFolders;
-}
   private async fetchConversationThread(
     orgId: string,
     mailboxEmail: string,
     conversationId: string,
     token: string,
   ): Promise<GraphEmailResponse['value']> {
-    const limit = pLimit(5);
     try {
       const folderResponse = await this.limiter.schedule(() =>
         axios.get<{
@@ -365,37 +499,35 @@ export class LeadService {
         } while (url);
 
         const emailPromises = messageIds.map(({ id }) =>
-          limit(() =>
-            this.limiter.schedule(async () => {
-              try {
-                const emailResponse = await axios.get<
-                  GraphEmailResponse['value'][0]
-                >(
-                  `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}/messages/${id}`,
-                  {
-                    headers: { Authorization: `Bearer ${token}` },
-                    params: {
-                      $select:
-                        'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body,bodyPreview,hasAttachments,conversationId,internetMessageId',
-                    },
+          this.limiter.schedule(async () => {
+            try {
+              const emailResponse = await axios.get<
+                GraphEmailResponse['value'][0]
+              >(
+                `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}/messages/${id}`,
+                {
+                  headers: { Authorization: `Bearer ${token}` },
+                  params: {
+                    $select:
+                      'id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body,bodyPreview,hasAttachments,conversationId,internetMessageId',
                   },
+                },
+              );
+              const emailData = emailResponse.data;
+              if (emailData.hasAttachments) {
+                const attachmentResponse = await this.limiter.schedule(() =>
+                  axios.get<AttachmentResponse>(
+                    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}/messages/${id}/attachments`,
+                    { headers: { Authorization: `Bearer ${token}` } },
+                  ),
                 );
-                const emailData = emailResponse.data;
-                if (emailData.hasAttachments) {
-                  const attachmentResponse = await this.limiter.schedule(() =>
-                    axios.get<AttachmentResponse>(
-                      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}/messages/${id}/attachments`,
-                      { headers: { Authorization: `Bearer ${token}` } },
-                    ),
-                  );
-                  emailData.attachments = attachmentResponse.data.value;
-                }
-                return emailData;
-              } catch (error) {
-                return undefined;
+                emailData.attachments = attachmentResponse.data.value;
               }
-            }),
-          ),
+              return emailData;
+            } catch (error) {
+              return undefined;
+            }
+          }),
         );
 
         return (await Promise.all(emailPromises)).filter(
@@ -407,7 +539,9 @@ export class LeadService {
       let allEmails = (
         await Promise.all(
           folders.map((folder) =>
-            limit(() => fetchEmailsFromFolder(folder, mailboxEmail)),
+            this.limiter.schedule(() =>
+              fetchEmailsFromFolder(folder, mailboxEmail),
+            ),
           ),
         )
       ).flat();
@@ -438,7 +572,9 @@ export class LeadService {
             }));
             return Promise.all(
               folders.map((folder) =>
-                limit(() => fetchEmailsFromFolder(folder, altMailbox.email)),
+                this.limiter.schedule(() =>
+                  fetchEmailsFromFolder(folder, altMailbox.email),
+                ),
               ),
             );
           }),
@@ -453,6 +589,7 @@ export class LeadService {
           new Date(b.receivedDateTime).getTime(),
       );
     } catch (error) {
+      this.logger.warn(`Failed to fetch conversation thread: ${error.message}`);
       return [];
     }
   }
@@ -643,10 +780,17 @@ export class LeadService {
     const specialEmails = leadConfig?.specialEmails || [];
     let leadEmail = senderEmail;
     if (specialEmails.includes(senderEmail)) {
+      this.logger.log(
+        `Sender ${senderEmail} is a special email, attempting to extract email from content`,
+      );
+
       const subject = email.subject || '';
       const body = striptags(email.body?.content || email.bodyPreview || '')
         .replace(/\s+/g, ' ')
         .trim();
+
+      this.logger.debug(`Cleaned subject: ${subject}`);
+      this.logger.debug(`Cleaned body: ${body}`);
       const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
       const foundEmails = ((subject.match(emailRegex) as string[]) || [])
         .concat((body.match(emailRegex) as string[]) || [])
@@ -655,7 +799,10 @@ export class LeadService {
           (email) =>
             !excludedEmails.includes(email) && !specialEmails.includes(email),
         );
+
+      this.logger.debug(`Found emails: ${JSON.stringify(foundEmails)}`);
       leadEmail = foundEmails[0] || senderEmail;
+      this.logger.log(`Selected lead email: ${leadEmail}`);
     }
 
     const filters = leadConfig?.filters || [
@@ -939,18 +1086,7 @@ export class LeadService {
       const syncValidation = await this.validateSyncSettings(orgId);
       if (!syncValidation.valid) return syncValidation.response;
 
-      const credResult = await this.getPlatformCredentials(orgId);
-      if (credResult.needsAuth && !credResult.creds?.access_token) {
-        return { needsAuth: true, message: 'Credentials required' };
-      }
-
-      let token: string;
-      if (!credResult.needsAuth && credResult.creds?.access_token) {
-        token = credResult.creds.access_token;
-      } else {
-        token = await this.authService.getMicrosoftAppToken(orgId);
-      }
-
+      const { access_token: token } = await this.getPlatformCredentials(orgId);
       const mailboxes = await this.getMailboxes(
         orgId,
         syncValidation.sharedMailbox!,
@@ -959,12 +1095,10 @@ export class LeadService {
       const emails = await this.fetchEmails(orgId, mailboxes, token);
       await this.storeLeads(orgId, emails, mailboxes, token);
 
-      return { needsAuth: false, message: 'Sync Successful' };
+      return { message: 'Sync Successful' };
     } catch (error) {
-      return {
-        needsAuth: true,
-        authUrl: 'http://localhost:5000/auth/microsoft/leads',
-      };
+      this.logger.error(`Sync failed for org ${orgId}: ${error.message}`);
+      return { message: `Sync failed: ${error.message}` };
     }
   }
 
@@ -972,48 +1106,62 @@ export class LeadService {
     orgId: string,
     mailboxEmail: string,
   ): Promise<Folder[]> {
-    const credResult = await this.getPlatformCredentials(orgId);
-    if (credResult.needsAuth || !credResult.creds?.access_token) {
-      throw new HttpException('Credentials required', HttpStatus.UNAUTHORIZED);
+    const { access_token: token } = await this.getPlatformCredentials(orgId);
+
+    try {
+      const tokenPayload = JSON.parse(
+        Buffer.from(token.split('.')[1], 'base64').toString(),
+      );
+      this.logger.log(
+        `Token payload for ${mailboxEmail}: ${JSON.stringify(tokenPayload, null, 2)}`,
+      );
+      this.logger.log(
+        `Token roles for ${mailboxEmail}: ${tokenPayload.roles || 'none'}`,
+      );
+      if (!tokenPayload.roles?.includes('Mail.Read')) {
+        this.logger.error(`Token lacks Mail.Read role for ${mailboxEmail}`);
+        throw new Error('Invalid token roles');
+      }
+    } catch (e) {
+      this.logger.warn(
+        `Failed to decode token for ${mailboxEmail}: ${e.message}`,
+      );
     }
 
     try {
-    const tokenPayload = JSON.parse(
-      Buffer.from(credResult.creds.access_token.split('.')[1], 'base64').toString(),
-    );
-    this.logger.log(`Token payload for ${mailboxEmail}: ${tokenPayload}`);
-    this.logger.log(`Token scopes for ${mailboxEmail}: ${tokenPayload.scp}`);
-  } catch (e) {
-    this.logger.error(`Failed to decode token: ${e.message}`);
-  }
-
-    try {
+      this.logger.log(`Fetching folders for mailbox: ${mailboxEmail}`);
       const response = await this.limiter.schedule(() =>
         axios.get<{
-          value: { id: string; displayName: string; wellKnownName?: string }[];
+          value: { id: string; displayName: string }[];
         }>(
           `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailboxEmail)}/mailFolders`,
           {
-            headers: {
-              Authorization: `Bearer ${credResult.creds!.access_token}`,
+            headers: { Authorization: `Bearer ${token}` },
+            params: {
+              $top: 50,
+              $select: 'id,displayName', // Removed wellKnownName
+              includeHiddenFolders: false,
             },
           },
         ),
       );
 
-      const folders: Folder[] = response.data.value.map((f) => ({
-        id: f.id,
-        name: f.displayName,
-      }));
+      let folders: Folder[] = response.data.value
+        .filter((f) => f.displayName && f.id)
+        .map((f) => ({
+          id: f.id,
+          name: f.displayName,
+        }));
 
       if (folders.length === 0) {
+        this.logger.warn(
+          `No folders found for ${mailboxEmail}, fetching inbox`,
+        );
         const inboxResponse = await this.limiter.schedule(() =>
           axios.get<{ id: string; displayName: string }>(
             `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailboxEmail)}/mailFolders/inbox`,
             {
-              headers: {
-                Authorization: `Bearer ${credResult.creds!.access_token}`,
-              },
+              headers: { Authorization: `Bearer ${token}` },
             },
           ),
         );
@@ -1023,178 +1171,251 @@ export class LeadService {
         });
       }
 
+      this.logger.log(`Fetched ${folders.length} folders for ${mailboxEmail}`);
       return folders;
-    } catch (error) {
+    } catch (error: any) {
+      const status = error.response?.status;
+      const errorDetails = error.response?.data?.error || {};
       this.logger.error(
-    `Failed to fetch folders for ${mailboxEmail}: ${error.message}`,
-    JSON.stringify(error.response?.data, null, 2),
-  );
-      throw new HttpException(
-    `Failed to fetch folders for ${mailboxEmail}: ${error.response?.data?.error?.message || error.message}`,
-    HttpStatus.BAD_REQUEST,
-  );
+        `Failed to fetch folders for ${mailboxEmail}: HTTP ${status || 'unknown'}, Details: ${JSON.stringify(errorDetails)}`,
+      );
+
+      if (status === 400) {
+        this.logger.warn(
+          `Invalid request for ${mailboxEmail}. Check mailbox validity or query parameters.`,
+        );
+      } else if (status === 403) {
+        this.logger.error(
+          `Permission denied for ${mailboxEmail}. Check app permissions or mailbox access.`,
+        );
+      } else if (status === 404) {
+        this.logger.error(
+          `Mailbox ${mailboxEmail} not found. Verify email address.`,
+        );
+      } else {
+        this.logger.error(
+          `Unexpected error for ${mailboxEmail}: ${error.message}`,
+        );
+      }
+
+      // Fallback to default folder
+      this.logger.log(`Returning fallback folder for ${mailboxEmail}`);
+      return [{ id: 'inbox', name: 'Inbox' }];
     }
   }
 
   async updateLeadConfig(
-  orgId: string,
-  data: {
-    filters?: string[];
-    folders?: Record<string, string[]>;
-    syncInterval?: string;
-    excludedEmails?: string[];
-    specialEmails?: string[];
-    sharedMailbox?: string;
-  },
-) {
-  const org = await this.prisma.organization.findUnique({
-    where: { id: orgId },
-    include: { leadConfig: true },
-  });
-  if (!org) {
-    throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
-  }
+    orgId: string,
+    data: {
+      filters?: string[];
+      folders?: Record<string, { id: string; name: string }[]>;
+      syncInterval?: string;
+      excludedEmails?: string[];
+      specialEmails?: string[];
+      sharedMailbox?: string;
+    },
+  ) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      include: { leadConfig: true },
+    });
+    if (!org) {
+      throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
+    }
 
-  let validatedFolders: Record<string, { id: string; name: string }[]> | undefined;
-  if (data.folders) {
-    validatedFolders = {};
-    for (const [mailboxEmail, folderIds] of Object.entries(data.folders)) {
-      try {
-        const availableFolders = await this.listMailboxFolders(orgId, mailboxEmail);
-        const validFolders = folderIds
-          .map((id) => {
-            const folder = availableFolders.find((f) => f.id === id);
-            return folder ? { id: folder.id, name: folder.name } : null;
-          })
-          .filter((f): f is { id: string; name: string } => f !== null);
-        validatedFolders[mailboxEmail.toLowerCase()] =
-          validFolders.length > 0
-            ? validFolders
-            : [{ id: 'inbox', name: 'Inbox' }]; // Default to Inbox
-      } catch (error) {
-        validatedFolders[mailboxEmail.toLowerCase()] = [{ id: 'inbox', name: 'Inbox' }];
+    this.logger.log(`Updating lead config for org ${orgId}`);
+    this.logger.log(`Data received: ${JSON.stringify(data)}`);
+    // Validate folder objects
+    let validatedFolders:
+      | Record<string, { id: string; name: string }[]>
+      | undefined;
+    if (data.folders) {
+      validatedFolders = {};
+      for (const [mailboxEmail, folders] of Object.entries(data.folders)) {
+        try {
+          const availableFolders = await this.listMailboxFolders(
+            orgId,
+            mailboxEmail,
+          );
+          const validFolders = folders
+            .map((folder) => {
+              const match = availableFolders.find((f) => f.id === folder.id);
+              return match ? { id: match.id, name: match.name } : null;
+            })
+            .filter((f): f is { id: string; name: string } => f !== null);
+          validatedFolders[mailboxEmail.toLowerCase()] =
+            validFolders.length > 0 ? validFolders : [];
+        } catch (error) {
+          this.logger.error(
+            `Failed to validate folders for ${mailboxEmail}: ${error.message}`,
+          );
+          validatedFolders[mailboxEmail.toLowerCase()] = [];
+        }
       }
     }
+
+    let updatedLeadConfig;
+
+    await this.prisma.$transaction(async (prisma) => {
+      // Update sharedMailbox if provided
+      if (data.sharedMailbox !== undefined) {
+        await prisma.organization.update({
+          where: { id: orgId },
+          data: { sharedMailbox: data.sharedMailbox },
+        });
+      }
+
+      // Prepare lead config data
+      const leadConfigData = {
+        filters: data.filters || [
+          'inquiry',
+          'interested',
+          'quote',
+          'sales',
+          'meeting',
+        ],
+        folders: validatedFolders || {},
+        syncInterval: data.syncInterval || 'EVERY_HOUR',
+        excludedEmails: data.excludedEmails || [],
+        specialEmails: data.specialEmails || [],
+      };
+
+      if (!org.leadConfig) {
+        // Create new lead config
+        updatedLeadConfig = await prisma.leadConfiguration.create({
+          data: {
+            orgId,
+            ...leadConfigData,
+          },
+        });
+      } else {
+        // Update existing lead config
+        updatedLeadConfig = await prisma.leadConfiguration.update({
+          where: { orgId },
+          data: {
+            filters: data.filters !== undefined ? data.filters : undefined,
+            folders:
+              validatedFolders !== undefined ? validatedFolders : undefined,
+            syncInterval:
+              data.syncInterval !== undefined ? data.syncInterval : undefined,
+            excludedEmails:
+              data.excludedEmails !== undefined
+                ? data.excludedEmails
+                : undefined,
+            specialEmails:
+              data.specialEmails !== undefined ? data.specialEmails : undefined,
+          },
+        });
+      }
+
+      // Reschedule sync if syncInterval changed
+      if (data.syncInterval !== undefined || !this.jobs.has(orgId)) {
+        this.logger.log(
+          `Rescheduling sync for org ${orgId} due to config update`,
+        );
+        await this.scheduleOrgSync(orgId, updatedLeadConfig.syncInterval);
+      }
+    });
+
+    return {
+      ...updatedLeadConfig,
+      folders: validatedFolders || updatedLeadConfig.folders,
+    };
   }
 
-  let updatedLeadConfig;
+  async setupLeadSync(
+    orgId: string,
+    userId: string,
+    data: {
+      sharedMailbox: string;
+      filters?: string[];
+      folders?: Record<string, string[]>;
+      syncInterval?: string;
+      excludedEmails?: string[];
+      specialEmails?: string[];
+    },
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+    });
+    if (!user || user.role !== 'ADMIN') {
+      throw new HttpException(
+        'Only admins can setup lead sync',
+        HttpStatus.FORBIDDEN,
+      );
+    }
 
-  await this.prisma.$transaction(async (prisma) => {
-    if (data.sharedMailbox !== undefined) {
+    let validatedFolders: Record<string, { id: string; name: string }[]> = {};
+    if (data.folders) {
+      for (const [mailboxEmail, folderIds] of Object.entries(data.folders)) {
+        try {
+          const availableFolders = await this.listMailboxFolders(
+            orgId,
+            mailboxEmail,
+          );
+          const validFolders = folderIds
+            .map((id) => {
+              const folder = availableFolders.find((f) => f.id === id);
+              return folder ? { id: folder.id, name: folder.name } : null;
+            })
+            .filter((f): f is { id: string; name: string } => f !== null);
+          validatedFolders[mailboxEmail.toLowerCase()] =
+            validFolders.length > 0
+              ? validFolders
+              : [{ id: 'inbox', name: 'Inbox' }];
+        } catch (error) {
+          validatedFolders[mailboxEmail.toLowerCase()] = [
+            { id: 'inbox', name: 'Inbox' },
+          ];
+        }
+      }
+    } else {
+      validatedFolders = {
+        [data.sharedMailbox.toLowerCase()]: [{ id: 'inbox', name: 'Inbox' }],
+      };
+    }
+
+    await this.prisma.$transaction(async (prisma) => {
       await prisma.organization.update({
         where: { id: orgId },
         data: { sharedMailbox: data.sharedMailbox },
       });
-    }
 
-    if (!org.leadConfig) {
-      updatedLeadConfig = await prisma.leadConfiguration.create({
-        data: {
+      await prisma.leadConfiguration.upsert({
+        where: { orgId },
+        create: {
           orgId,
-          filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
-          folders: validatedFolders || {
-            [org.sharedMailbox?.toLowerCase() || 'inbox']: [{ id: 'inbox', name: 'Inbox' }],
-          },
+          filters: data.filters || [
+            'inquiry',
+            'interested',
+            'quote',
+            'sales',
+            'meeting',
+          ],
+          folders: validatedFolders,
+          syncInterval: data.syncInterval || 'EVERY_HOUR',
+          excludedEmails: data.excludedEmails || [],
+          specialEmails: data.specialEmails || [],
+        },
+        update: {
+          filters: data.filters || [
+            'inquiry',
+            'interested',
+            'quote',
+            'sales',
+            'meeting',
+          ],
+          folders: validatedFolders,
           syncInterval: data.syncInterval || 'EVERY_HOUR',
           excludedEmails: data.excludedEmails || [],
           specialEmails: data.specialEmails || [],
         },
       });
-    } else {
-      updatedLeadConfig = await prisma.leadConfiguration.update({
-        where: { orgId },
-        data: {
-          filters: data.filters !== undefined ? data.filters : undefined,
-          folders: validatedFolders !== undefined ? validatedFolders : undefined,
-          syncInterval: data.syncInterval !== undefined ? data.syncInterval : undefined,
-          excludedEmails: data.excludedEmails !== undefined ? data.excludedEmails : undefined,
-          specialEmails: data.specialEmails !== undefined ? data.specialEmails : undefined,
-        },
-      });
-
-      if (data.syncInterval !== undefined || !this.jobs.has(orgId)) {
-        this.logger.log(`Rescheduling sync for org ${orgId} due to config update`);
-        await this.scheduleOrgSync(orgId, updatedLeadConfig.syncInterval);
-      }
-    }
-  });
-
-  return { ...updatedLeadConfig, folders: validatedFolders || updatedLeadConfig.folders };
-}
-
-  async setupLeadSync(
-  orgId: string,
-  userId: string,
-  data: {
-    sharedMailbox: string;
-    filters?: string[];
-    folders?: Record<string, string[]>;
-    syncInterval?: string;
-    excludedEmails?: string[];
-    specialEmails?: string[];
-  },
-) {
-  const user = await this.prisma.user.findUnique({
-    where: { user_id: userId },
-  });
-  if (!user || user.role !== 'ADMIN') {
-    throw new HttpException('Only admins can setup lead sync', HttpStatus.FORBIDDEN);
-  }
-
-  let validatedFolders: Record<string, { id: string; name: string }[]> = {};
-  if (data.folders) {
-    for (const [mailboxEmail, folderIds] of Object.entries(data.folders)) {
-      try {
-        const availableFolders = await this.listMailboxFolders(orgId, mailboxEmail);
-        const validFolders = folderIds
-          .map((id) => {
-            const folder = availableFolders.find((f) => f.id === id);
-            return folder ? { id: folder.id, name: folder.name } : null;
-          })
-          .filter((f): f is { id: string; name: string } => f !== null);
-        validatedFolders[mailboxEmail.toLowerCase()] =
-          validFolders.length > 0
-            ? validFolders
-            : [{ id: 'inbox', name: 'Inbox' }];
-      } catch (error) {
-        validatedFolders[mailboxEmail.toLowerCase()] = [{ id: 'inbox', name: 'Inbox' }];
-      }
-    }
-  } else {
-    validatedFolders = {
-      [data.sharedMailbox.toLowerCase()]: [{ id: 'inbox', name: 'Inbox' }],
-    };
-  }
-
-  await this.prisma.$transaction(async (prisma) => {
-    await prisma.organization.update({
-      where: { id: orgId },
-      data: { sharedMailbox: data.sharedMailbox },
     });
 
-    await prisma.leadConfiguration.upsert({
-      where: { orgId },
-      create: {
-        orgId,
-        filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
-        folders: validatedFolders,
-        syncInterval: data.syncInterval || 'EVERY_HOUR',
-        excludedEmails: data.excludedEmails || [],
-        specialEmails: data.specialEmails || [],
-      },
-      update: {
-        filters: data.filters || ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
-        folders: validatedFolders,
-        syncInterval: data.syncInterval || 'EVERY_HOUR',
-        excludedEmails: data.excludedEmails || [],
-        specialEmails: data.specialEmails || [],
-      },
-    });
-  });
-
-  this.logger.log(`Lead sync setup completed for org ${orgId}`);
-  return { message: 'Lead sync setup successful', folders: validatedFolders };
-}
+    this.logger.log(`Lead sync setup completed for org ${orgId}`);
+    return { message: 'Lead sync setup successful', folders: validatedFolders };
+  }
 
   async connectLeadSync(userId: string) {
     this.logger.log(
@@ -1203,81 +1424,42 @@ export class LeadService {
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
-    if (!user) throw new UnauthorizedException('User not found');
-
+    if (!user)
+      throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
     if (user.role !== 'ADMIN') {
-      throw new ForbiddenException('Only admins can connect lead sync');
+      throw new HttpException(
+        'Only admins can connect lead sync',
+        HttpStatus.FORBIDDEN,
+      );
     }
 
+    const orgId = user.orgId;
     const org = await this.prisma.organization.findUnique({
-      where: { id: user.orgId },
+      where: { id: orgId },
       select: { sharedMailbox: true },
     });
     const leadConfig = await this.prisma.leadConfiguration.findUnique({
-      where: { orgId: user.orgId },
+      where: { orgId },
     });
 
     if (!org?.sharedMailbox || !leadConfig) {
-      this.logger.log(`Setup required for org ${user.orgId}`);
-      return { needsSetup: true };
+      this.logger.log(`Setup required for org ${orgId}`);
+      return {
+        message: 'Setup required: configure shared mailbox and lead settings',
+      };
     }
 
-    const platform = await this.prisma.marketingPlatform.upsert({
-      where: {
-        orgId_platform_name: {
-          orgId: user.orgId,
-          platform_name: this.platformName,
-        },
-      },
-      create: {
-        orgId: user.orgId,
-        platform_name: this.platformName,
-        sync_status: 'CONNECTED',
-      },
-      update: {
-        sync_status: 'CONNECTED',
-      },
-    });
-
-    // Check for existing org-wide credentials
-    const existingCredentials = await this.prisma.platformCredentials.findFirst(
-      {
-        where: {
-          platform_id: platform.platform_id,
-          user_id: null,
-          type: 'LEADS',
-        },
-      },
-    );
-
-    if (existingCredentials) {
-      this.logger.log(
-        `Org-wide credentials already exist for org ${user.orgId}`,
-      );
-      await this.scheduleOrgSync(user.orgId, leadConfig.syncInterval);
-      await this.prisma.microsoftPreferences.upsert({
-        where: { orgId: user.orgId },
-        create: { orgId: user.orgId, leadSyncEnabled: true },
-        update: { leadSyncEnabled: true },
-      });
-      return { needsAuth: false, message: 'Lead sync already connected' };
-    }
+    await this.getPlatformCredentials(orgId); // Ensure token exists
 
     await this.prisma.microsoftPreferences.upsert({
-      where: { orgId: user.orgId },
-      create: { orgId: user.orgId, leadSyncEnabled: true },
+      where: { orgId },
+      create: { orgId, leadSyncEnabled: true },
       update: { leadSyncEnabled: true },
     });
 
-    await this.scheduleOrgSync(user.orgId, leadConfig.syncInterval);
-
-    this.logger.log(
-      `Initiating Microsoft lead sync auth for org ${user.orgId}`,
-    );
-    return {
-      needsAuth: true,
-      authUrl: 'http://localhost:5000/auth/microsoft/leads',
-    };
+    await this.scheduleOrgSync(orgId, leadConfig.syncInterval);
+    this.logger.log(`Microsoft lead sync connected for org ${orgId}`);
+    return { message: 'Lead sync connected' };
   }
 
   async disconnectLeadSync(userId: string) {
@@ -1287,23 +1469,27 @@ export class LeadService {
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
-    if (!user) throw new UnauthorizedException('User not found');
-
+    if (!user)
+      throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
     if (user.role !== 'ADMIN') {
-      throw new ForbiddenException('Only admins can disconnect lead sync');
+      throw new HttpException(
+        'Only admins can disconnect lead sync',
+        HttpStatus.FORBIDDEN,
+      );
     }
 
+    const orgId = user.orgId;
     const platform = await this.prisma.marketingPlatform.findFirst({
-      where: { orgId: user.orgId, platform_name: this.platformName },
+      where: { orgId, platform_name: this.platformName },
     });
-    if (!platform)
+    if (!platform) {
       throw new HttpException(
         'Microsoft platform not found',
         HttpStatus.NOT_FOUND,
       );
+    }
 
     await this.prisma.$transaction(async (prisma) => {
-      // Delete org-wide credentials
       await prisma.platformCredentials.deleteMany({
         where: {
           platform_id: platform.platform_id,
@@ -1313,7 +1499,7 @@ export class LeadService {
       });
 
       await prisma.microsoftPreferences.update({
-        where: { orgId: user.orgId },
+        where: { orgId },
         data: { leadSyncEnabled: false },
       });
 
@@ -1323,87 +1509,47 @@ export class LeadService {
       });
     });
 
-    const job = this.jobs.get(user.orgId);
+    const job = this.jobs.get(orgId);
     if (job) {
       job.cancel();
-      this.jobs.delete(user.orgId);
-      this.logger.log(`Cancelled sync job for org ${user.orgId}`);
+      this.jobs.delete(orgId);
+      this.logger.log(`Cancelled sync job for org ${orgId}`);
     }
 
-    this.logger.log(`Microsoft lead sync disconnected for org ${user.orgId}`);
-    return {
-      message: 'Microsoft lead sync disconnected.',
-    };
+    this.logger.log(`Microsoft lead sync disconnected for org ${orgId}`);
+    return { message: 'Microsoft lead sync disconnected' };
   }
 
   async connectMemberLeadSync(userId: string) {
-    this.logger.log(`Connecting member Microsoft lead sync for user ${userId}`);
+    this.logger.log(`Enabling member lead sync for user ${userId}`);
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
     if (!user) throw new UnauthorizedException('User not found');
 
-    const platform = await this.prisma.marketingPlatform.findFirst({
-      where: { orgId: user.orgId, platform_name: this.platformName },
+    await this.prisma.user.update({
+      where: { user_id: userId },
+      data: { allowPersonalEmailSync: true },
     });
-    if (!platform) {
-      this.logger.log(`No Microsoft platform found for org ${user.orgId}`);
-      return {
-        needsAuth: true,
-        authUrl: 'http://localhost:5000/auth/microsoft/leads',
-      };
-    }
 
-    const existingCredentials = await this.prisma.platformCredentials.findFirst(
-      {
-        where: {
-          platform_id: platform.platform_id,
-          user_id: userId,
-          type: 'LEADS',
-        },
-      },
-    );
-    if (existingCredentials) {
-      this.logger.log(`User ${userId} already has LEADS credentials`);
-      return { needsAuth: false, message: 'Already connected' };
-    }
-
-    return {
-      needsAuth: true,
-      authUrl: 'http://localhost:5000/auth/microsoft/leads',
-    };
+    this.logger.log(`Member lead sync enabled for user ${userId}`);
+    return { message: 'Member lead sync enabled' };
   }
 
   async disconnectMemberLeadSync(userId: string) {
-    this.logger.log(
-      `Disconnecting member Microsoft lead sync for user ${userId}`,
-    );
+    this.logger.log(`Disabling member lead sync for user ${userId}`);
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
     if (!user) throw new UnauthorizedException('User not found');
 
-    const platform = await this.prisma.marketingPlatform.findFirst({
-      where: { orgId: user.orgId, platform_name: this.platformName },
-    });
-    if (!platform)
-      throw new HttpException(
-        'Microsoft platform not found',
-        HttpStatus.NOT_FOUND,
-      );
-
-    await this.prisma.platformCredentials.deleteMany({
-      where: {
-        platform_id: platform.platform_id,
-        user_id: userId,
-        type: 'LEADS',
-      },
+    await this.prisma.user.update({
+      where: { user_id: userId },
+      data: { allowPersonalEmailSync: false },
     });
 
-    this.logger.log(
-      `Member Microsoft lead sync disconnected for user ${userId}`,
-    );
-    return { message: 'Member Microsoft lead sync disconnected' };
+    this.logger.log(`Member lead sync disabled for user ${userId}`);
+    return { message: 'Member lead sync disabled' };
   }
 
   async scheduleOrgSync(orgId: string, syncInterval?: string) {
@@ -1433,7 +1579,6 @@ export class LeadService {
     );
 
     const job = schedule.scheduleJob(cronExpression, async () => {
-      // Prevent concurrent syncs
       if (this.runningSyncs.has(orgId)) {
         this.logger.warn(`Sync already running for org ${orgId}, skipping`);
         return;
@@ -1442,12 +1587,8 @@ export class LeadService {
       this.runningSyncs.add(orgId);
       this.logger.log(`Starting sync for org ${orgId}`);
       try {
-        const result = await this.fetchAndStoreLeads(orgId);
-        if (result?.needsAuth) {
-          this.logger.warn(`Org ${orgId} needs to re-authenticate`);
-        } else {
-          this.logger.log(`Sync completed for org ${orgId}`);
-        }
+        await this.fetchAndStoreLeads(orgId);
+        this.logger.log(`Sync completed for org ${orgId}`);
       } catch (error) {
         this.logger.error(`Sync failed for org ${orgId}: ${error.message}`);
       } finally {

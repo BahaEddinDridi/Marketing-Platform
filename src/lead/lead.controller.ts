@@ -141,13 +141,14 @@ export class LeadController {
     @Body()
     data: {
       filters?: string[];
-      folders?: Record<string, string[]>;
+      folders?: Record<string, { id: string; name: string }[]>;
       syncInterval?: string;
       excludedEmails?: string[];
       specialEmails?: string[];
       sharedMailbox?: string;
     },
   ) {
+    console.log(`Received lead config update for org ${orgId}: ${JSON.stringify(data, null, 2)}`);
     const user = req.user as { orgId: string };
     if (user.orgId !== orgId)
       throw new HttpException('Forbidden', HttpStatus.FORBIDDEN);

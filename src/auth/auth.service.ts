@@ -359,27 +359,31 @@ export class AuthService {
           role = userCount === 0 ? 'ADMIN' : 'USER';
         }
 
-        // For admins, fetch and update tenantId
+
         let tenantId: string | null = null;
         if (role === 'ADMIN') {
-          try {
-            tenantId = await this.getTenantIdFromToken(accessToken);
-            this.logger.log(`Extracted tenantId for admin: ${tenantId}`);
+  try {
+    const entraCreds = await this.getEntraCredentials();
+    tenantId = entraCreds.tenantId;
+    this.logger.log(`Using tenantId from Entra credentials: ${tenantId}`);
+  } catch (error) {
+    this.logger.warn(`Failed to get Entra credentials: ${error.message}, falling back to .env`);
+    tenantId = this.configService.get('TENANT_ID') || null;
+    if (!tenantId) {
+      this.logger.warn(`No tenantId found in .env`);
+    }
+  }
 
-            await prisma.organization.update({
-              where: { id: org.id },
-              data: { tenantId },
-            });
-            this.logger.log(
-              `Updated organization ${org.id} with tenantId: ${tenantId}`,
-            );
-          } catch (error) {
-            this.logger.warn(
-              `Failed to extract or update tenantId: ${error.message}`,
-            );
-            // Continue without setting tenantId
-          }
-        }
+  if (tenantId) {
+    await prisma.organization.update({
+      where: { id: org.id },
+      data: { tenantId },
+    });
+    this.logger.log(`Updated organization ${org.id} with tenantId: ${tenantId}`);
+  } else {
+    this.logger.warn(`No tenantId available to update organization ${org.id}`);
+  }
+}
 
         if (!user) {
           user = await prisma.user.create({
@@ -517,307 +521,4 @@ console.log(`Microsoft user validated: ${user.email}, tokens generated`);
     };
   }
 
-  async refreshMicrosoftToken(
-    orgId: string,
-    scopes: string[],
-  ): Promise<string> {
-    const platform = await this.prisma.marketingPlatform.findFirst({
-      where: { orgId, platform_name: 'Microsoft' },
-    });
-    if (!platform) throw new Error('No Microsoft platform found');
-
-    const org = await this.prisma.organization.findUnique({
-      where: { id: orgId },
-      select: { tenantId: true },
-    });
-    if (!org || !org.tenantId) {
-      this.logger.error(`No tenantId found for org ${orgId}`);
-      throw new Error('No tenantId found for organization');
-    }
-
-    const creds = await this.prisma.platformCredentials.findFirst({
-      where: {
-        platform_id: platform.platform_id,
-        scopes: { hasEvery: scopes },
-      },
-    });
-    if (!creds || !creds.refresh_token)
-      throw new Error('No valid refresh token');
-
-    try {
-
-      const { clientId, clientSecret, tenantId } = await this.getEntraCredentials();
-
-      if (!clientId || !clientSecret) {
-        throw new Error('Missing Microsoft OAuth configuration');
-      }
-
-      const response = await axios.post<MicrosoftTokenResponse>(
-        `https://login.microsoftonline.com/${org.tenantId}/oauth2/v2.0/token`,
-        new URLSearchParams({
-          client_id: clientId,
-          client_secret: clientSecret,
-          grant_type: 'refresh_token',
-          refresh_token: creds.refresh_token,
-          scope: scopes.join(' '),
-        }).toString(),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
-      );
-
-      const { access_token, refresh_token, expires_in } = response.data;
-
-      await this.prisma.platformCredentials.update({
-        where: { credential_id: creds.credential_id },
-        data: {
-          access_token,
-          refresh_token: refresh_token || creds.refresh_token,
-          expires_at: new Date(Date.now() + expires_in * 1000),
-          updated_at: new Date(),
-        },
-      });
-
-      return access_token;
-    } catch (error) {
-      this.logger.error(
-        `Failed to refresh token: ${error.message}`,
-        error.response?.data,
-      );
-      throw new Error('No valid credentials');
-    }
-  }
-
-  async getMicrosoftToken(
-    orgId: string,
-    scopes: string[],
-  ): Promise<string> {
-    const platform = await this.prisma.marketingPlatform.findFirst({
-      where: { orgId, platform_name: 'Microsoft' },
-    });
-    if (!platform) throw new Error('No Microsoft platform found');
-
-    const creds = await this.prisma.platformCredentials.findFirst({
-      where: {
-        platform_id: platform.platform_id,
-        scopes: { hasEvery: scopes },
-      },
-    });
-    if (!creds || !creds.refresh_token) throw new Error('No valid credentials');
-
-    const isExpired =
-      creds.expires_at && new Date(creds.expires_at) < new Date();
-    if (!isExpired && creds.access_token) return creds.access_token;
-
-    return this.refreshMicrosoftToken(orgId, scopes);
-  }
-
-  async updateMicrosoftCredentials(
-    microsoftId: string,
-    email: string,
-    accessToken: string,
-    refreshToken: string | null,
-    expiresIn: number,
-    scopes: string[],
-    type: 'AUTH' | 'LEADS',
-  ) {
-    this.logger.log(
-      `Updating Microsoft credentials for org (email: ${email}, type: ${type})`,
-    );
-    const org = await this.prisma.organization.findUnique({
-      where: { id: 'single-org' },
-    });
-    if (!org) {
-      this.logger.error(`Organization not found for id: single-org`);
-      throw new Error('Organization not found');
-    }
-  
-    let tenantId: string | null = null;
-    try {
-      tenantId = await this.getTenantIdFromToken(accessToken);
-      if (tenantId && tenantId !== 'tenant-id-placeholder') {
-        await this.prisma.organization.update({
-          where: { id: org.id },
-          data: { tenantId },
-        });
-        this.logger.log(`Updated tenantId for org ${org.id}: ${tenantId}`);
-      } else {
-        this.logger.warn(`Invalid or placeholder tenantId for email: ${email}: ${tenantId}`);
-      }
-    } catch (error) {
-      this.logger.error(`Failed to fetch tenantId for email: ${email}: ${error.message}`);
-    }
-  
-    // Upsert MarketingPlatform for Microsoft
-    const platform = await this.prisma.marketingPlatform.upsert({
-      where: {
-        orgId_platform_name: {
-          orgId: org.id,
-          platform_name: 'Microsoft',
-        },
-      },
-      create: {
-        orgId: org.id,
-        platform_name: 'Microsoft',
-        sync_status: 'CONNECTED',
-      },
-      update: {
-        sync_status: 'CONNECTED',
-      },
-    });
-  
-    const existingCredentials = await this.prisma.platformCredentials.findFirst({
-      where: {
-        platform_id: platform.platform_id,
-        user_id: null, // Org-wide credentials
-        type,
-      },
-    });
-  
-    if (existingCredentials) {
-      // Update existing credentials
-      await this.prisma.platformCredentials.update({
-        where: { credential_id: existingCredentials.credential_id },
-        data: {
-          access_token: accessToken,
-          refresh_token: refreshToken,
-          scopes,
-          expires_at: new Date(Date.now() + expiresIn * 1000),
-        },
-      });
-    } else {
-      // Create new credentials
-      await this.prisma.platformCredentials.create({
-        data: {
-          platform_id: platform.platform_id,
-          user_id: null, // Org-wide credentials
-          type,
-          access_token: accessToken,
-          refresh_token: refreshToken,
-          scopes,
-          expires_at: new Date(Date.now() + expiresIn * 1000),
-        },
-      });
-    }
-    this.logger.log(
-      `Microsoft credentials updated for org ${org.id}, email: ${email}, type: ${type}`,
-    );
-    return { message: 'Microsoft credentials updated', tenantId };
-  }
-
-  async getTenantIdFromToken(token: string): Promise<string> {
-    const decoded = this.jwtService.decode(token) as any;
-    return decoded?.tid || 'tenant-id-placeholder'; // Replace with actual logic
-  }
-
-
-  async getMicrosoftAppToken(orgId: string): Promise<string> {
-  this.logger.log(`Fetching Microsoft app token for org ${orgId}`);
-
-  const { clientId, clientSecret, tenantId } = await this.getEntraCredentials();
-
-  try {
-    const response = await axios.post<MicrosoftTokenResponse>(
-      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-      new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        scope: 'https://graph.microsoft.com/.default',
-        grant_type: 'client_credentials',
-      }).toString(),
-      {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      },
-    );
-
-    const { access_token, expires_in } = response.data;
-
-    // Update credentials
-    await this.updateMicrosoftLeadsCredentials(
-      access_token,
-      null,
-      expires_in,
-      ['Mail.Read', 'Mail.Send', 'User.Read.All', 'Directory.Read.All'],
-      'LEADS',
-    );
-
-    this.logger.log(`App token acquired for org ${orgId}`);
-    return access_token;
-  } catch (error) {
-    this.logger.error(`Failed to get app token: ${error.message}`);
-    throw new Error('Failed to acquire application token');
-  }
-}
-
-async updateMicrosoftLeadsCredentials(
-  accessToken: string,
-  refreshToken: string | null,
-  expiresIn: number,
-  scopes: string[],
-  type: 'LEADS',
-) {
-  this.logger.log(
-    `Updating Microsoft app credentials for org (type: ${type})`,
-  );
-
-  const org = await this.prisma.organization.findUnique({
-    where: { id: 'single-org' },
-  });
-  if (!org) {
-    this.logger.error(`Organization not found for id: single-org`);
-    throw new Error('Organization not found');
-  }
-
-  const platform = await this.prisma.marketingPlatform.upsert({
-    where: {
-      orgId_platform_name: {
-        orgId: org.id,
-        platform_name: 'Microsoft',
-      },
-    },
-    create: {
-      orgId: org.id,
-      platform_name: 'Microsoft',
-      sync_status: 'CONNECTED',
-    },
-    update: {
-      sync_status: 'CONNECTED',
-    },
-  });
-
-  const existingCredentials = await this.prisma.platformCredentials.findFirst({
-    where: {
-      platform_id: platform.platform_id,
-      user_id: null,
-      type,
-    },
-  });
-
-  if (existingCredentials) {
-    await this.prisma.platformCredentials.update({
-      where: { credential_id: existingCredentials.credential_id },
-      data: {
-        access_token: accessToken,
-        refresh_token: refreshToken,
-        scopes,
-        expires_at: new Date(Date.now() + expiresIn * 1000),
-      },
-    });
-  } else {
-    await this.prisma.platformCredentials.create({
-      data: {
-        platform_id: platform.platform_id,
-        user_id: null, // Org-wide credentials
-        type,
-        access_token: accessToken,
-        refresh_token: refreshToken,
-        scopes,
-        expires_at: new Date(Date.now() + expiresIn * 1000),
-      },
-    });
-  }
-
-  this.logger.log(
-    `Microsoft app credentials updated for org ${org.id}, type: ${type}`,
-  );
-  return { message: 'Microsoft app credentials updated', tenantId: org.tenantId };
-}
 }

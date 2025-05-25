@@ -222,16 +222,7 @@ export class AuthController {
     res.redirect(redirectUrl);
   }
 
-  @Get('microsoft/leads')
-  @UseGuards(AuthGuard('microsoft-leads'))
-  async microsoftLeadsLogin() {}
-
-  @Get('microsoft/leads/callback')
-  @UseGuards(AuthGuard('microsoft-leads'))
-  async microsoftLeadsCallback(@Req() req, @Res() res: Response) {
-    res.redirect('http://localhost:3000/leads?auth=success');
-  }
-
+  
   @Post('microsoft/connect')
   @UseGuards(JwtAuthGuard)
   @Redirect()

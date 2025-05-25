@@ -56,6 +56,129 @@ export class AutoReplyService {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  private async getMicrosoftToken(orgId: string) {
+    this.logger.log(`Fetching Microsoft app token for org ${orgId}`);
+
+    let clientId = this.configService.get('CLIENT_ID');
+    let clientSecret = this.configService.get('CLIENT_SECRET');
+    let tenantId = this.configService.get('TENANT_ID');
+
+    try {
+      const entraCreds = await this.authService.getEntraCredentials();
+      if (entraCreds) {
+        clientId = entraCreds.clientId;
+        clientSecret = entraCreds.clientSecret;
+        tenantId = entraCreds.tenantId;
+        this.logger.log(`Using Entra credentials for org ${orgId}`);
+      } else {
+        this.logger.warn(
+          `No Entra credentials found for org ${orgId}, falling back to .env`,
+        );
+      }
+
+      if (!clientId || !clientSecret || !tenantId) {
+        throw new Error('Missing Entra ID credentials');
+      }
+
+      const response = await axios.post<{
+        access_token: string;
+        expires_in: number;
+      }>(
+        `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+        new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          scope: 'https://graph.microsoft.com/.default',
+          grant_type: 'client_credentials',
+        }).toString(),
+        {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        },
+      );
+
+      const { access_token, expires_in } = response.data;
+
+      await this.updateMicrosoftCredentials(
+        orgId,
+        access_token,
+        expires_in,
+        ['Mail.Read', 'Mail.Send', 'User.Read.All'],
+        'LEADS',
+      );
+
+      this.logger.log(`App token acquired for org ${orgId}`);
+      return access_token;
+    } catch (error) {
+      this.logger.error(`Failed to get app token: ${error.message}`);
+      throw new Error('Failed to acquire application token');
+    }
+  }
+
+  private async updateMicrosoftCredentials(
+    orgId: string,
+    accessToken: string,
+    expiresIn: number,
+    scopes: string[],
+    type: 'LEADS',
+  ) {
+    this.logger.log(
+      `Updating Microsoft credentials for org ${orgId}, type: ${type}`,
+    );
+
+    const platform = await this.prisma.marketingPlatform.upsert({
+      where: {
+        orgId_platform_name: {
+          orgId,
+          platform_name: this.platformName,
+        },
+      },
+      create: {
+        orgId,
+        platform_name: this.platformName,
+        sync_status: 'CONNECTED',
+      },
+      update: {
+        sync_status: 'CONNECTED',
+      },
+    });
+
+    const existingCredentials = await this.prisma.platformCredentials.findFirst(
+      {
+        where: {
+          platform_id: platform.platform_id,
+          user_id: null,
+          type,
+        },
+      },
+    );
+
+    if (existingCredentials) {
+      await this.prisma.platformCredentials.update({
+        where: { credential_id: existingCredentials.credential_id },
+        data: {
+          access_token: accessToken,
+          refresh_token: null,
+          scopes,
+          expires_at: new Date(Date.now() + expiresIn * 1000),
+        },
+      });
+    } else {
+      await this.prisma.platformCredentials.create({
+        data: {
+          platform_id: platform.platform_id,
+          user_id: null,
+          type,
+          access_token: accessToken,
+          refresh_token: null,
+          scopes,
+          expires_at: new Date(Date.now() + expiresIn * 1000),
+        },
+      });
+    }
+
+    this.logger.log(`Credentials updated for org ${orgId}, type: ${type}`);
+  }
+
   // Fetch platform credentials (same as LeadService)
   private async getPlatformCredentials(orgId: string) {
     const platform = await this.prisma.marketingPlatform.findFirst({
@@ -256,7 +379,7 @@ export class AutoReplyService {
       if (!credResult.needsAuth && credResult.creds?.access_token) {
         token = credResult.creds.access_token;
       } else {
-        token = await this.authService.getMicrosoftAppToken(orgId);
+        token = await this.getMicrosoftToken(orgId);
       }
 
       const leadConfig = await this.prisma.leadConfiguration.findUnique({
