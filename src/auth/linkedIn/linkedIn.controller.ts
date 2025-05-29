@@ -142,9 +142,7 @@ export class LinkedInController {
   @Get('pages')
   async getLinkedInPages(@Req() req: AuthenticatedRequest) {
     const user = req.user as { user_id: string; email: string; orgId: string; role: string };
-    if (user.role !== 'ADMIN') {
-      throw new HttpException('Only admins can view LinkedIn pages', HttpStatus.FORBIDDEN);
-    }
+
     return this.linkedInService.getStoredLinkedInPages();
   }
 

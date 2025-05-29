@@ -225,6 +225,21 @@ export class AuthService {
     if (!user) throw new UnauthorizedException('User not found');
     if (user.role !== 'ADMIN') throw new ForbiddenException('Only admins can save Entra credentials');
   
+    await this.prisma.marketingPlatform.upsert({
+      where: {
+        orgId_platform_name: {
+          orgId: 'single-org',
+          platform_name: 'Microsoft'
+        }
+      },
+      create: {
+        platform_name: 'Microsoft',
+        orgId: 'single-org',
+        sync_status: 'CONNECTED'
+      },
+      update: {}
+    });
+    
     await this.prisma.organization.update({
       where: { id: 'single-org' },
       data: {

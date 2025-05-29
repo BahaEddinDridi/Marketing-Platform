@@ -1324,143 +1324,141 @@ export class LeadService {
   }
 
   async setupLeadSync(
-    orgId: string,
-    userId: string,
-    data: {
-      sharedMailbox: string;
-      filters?: string[];
-      folders?: Record<string, string[]>;
-      syncInterval?: string;
-      excludedEmails?: string[];
-      specialEmails?: string[];
-    },
-  ) {
-    const user = await this.prisma.user.findUnique({
-      where: { user_id: userId },
-    });
-    if (!user || user.role !== 'ADMIN') {
-      throw new HttpException(
-        'Only admins can setup lead sync',
-        HttpStatus.FORBIDDEN,
-      );
-    }
+  orgId: string,
+  userId: string,
+  data: {
+    sharedMailbox: string;
+    filters?: string[];
+    syncInterval?: string;
+    excludedEmails?: string[];
+    specialEmails?: string[];
+  },
+) {
+  const user = await this.prisma.user.findUnique({
+    where: { user_id: userId },
+  });
+  if (!user || user.role !== 'ADMIN') {
+    throw new HttpException(
+      'Only admins can setup lead sync',
+      HttpStatus.FORBIDDEN,
+    );
+  }
 
-    let validatedFolders: Record<string, { id: string; name: string }[]> = {};
-    if (data.folders) {
-      for (const [mailboxEmail, folderIds] of Object.entries(data.folders)) {
-        try {
-          const availableFolders = await this.listMailboxFolders(
-            orgId,
-            mailboxEmail,
-          );
-          const validFolders = folderIds
-            .map((id) => {
-              const folder = availableFolders.find((f) => f.id === id);
-              return folder ? { id: folder.id, name: folder.name } : null;
-            })
-            .filter((f): f is { id: string; name: string } => f !== null);
-          validatedFolders[mailboxEmail.toLowerCase()] =
-            validFolders.length > 0
-              ? validFolders
-              : [{ id: 'inbox', name: 'Inbox' }];
-        } catch (error) {
-          validatedFolders[mailboxEmail.toLowerCase()] = [
-            { id: 'inbox', name: 'Inbox' },
-          ];
-        }
-      }
-    } else {
-      validatedFolders = {
-        [data.sharedMailbox.toLowerCase()]: [{ id: 'inbox', name: 'Inbox' }],
+  await this.prisma.$transaction(async (prisma) => {
+    await prisma.organization.update({
+      where: { id: orgId },
+      data: { sharedMailbox: data.sharedMailbox },
+    });
+
+    await prisma.leadConfiguration.upsert({
+      where: { orgId },
+      create: {
+        orgId,
+        filters: data.filters || [
+          'inquiry',
+          'interested',
+          'quote',
+          'sales',
+          'meeting',
+        ],
+        syncInterval: data.syncInterval || 'EVERY_HOUR',
+        excludedEmails: data.excludedEmails || [],
+        specialEmails: data.specialEmails || [],
+        folders: {}, // Default empty JSON object
+      },
+      update: {
+        filters: data.filters || [
+          'inquiry',
+          'interested',
+          'quote',
+          'sales',
+          'meeting',
+        ],
+        syncInterval: data.syncInterval || 'EVERY_HOUR',
+        excludedEmails: data.excludedEmails || [],
+        specialEmails: data.specialEmails || [],
+        folders: {}, // Default empty JSON object
+      },
+    });
+  });
+
+  this.logger.log(`Lead sync setup completed for org ${orgId}`);
+  return { message: 'Lead sync setup successful' };
+}
+
+ async connectLeadSync(
+  userId: string,
+  setupData?: {
+    sharedMailbox: string;
+    filters?: string[];
+    syncInterval?: string;
+    excludedEmails?: string[];
+    specialEmails?: string[];
+  },
+) {
+  this.logger.log(
+    `Connecting Microsoft lead sync for org via user ${userId}`,
+  );
+  const user = await this.prisma.user.findUnique({
+    where: { user_id: userId },
+  });
+  if (!user) {
+    throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
+  }
+  if (user.role !== 'ADMIN') {
+    throw new HttpException('Access denied', HttpStatus.FORBIDDEN);
+  }
+
+  const orgId = user.orgId;
+  const org = await this.prisma.organization.findUnique({
+    where: { id: orgId },
+    select: { sharedMailbox: true },
+  });
+  let leadConfig = await this.prisma.leadConfiguration.findUnique({
+    where: { orgId },
+  });
+
+  if (!org?.sharedMailbox || !leadConfig) {
+    if (!setupData) {
+      this.logger.log(`Setup required for org ${orgId}`);
+      return {
+        needsSetup: true,
+        message: 'Please configure shared mailbox and lead settings',
       };
     }
 
-    await this.prisma.$transaction(async (prisma) => {
-      await prisma.organization.update({
-        where: { id: orgId },
-        data: { sharedMailbox: data.sharedMailbox },
-      });
+    // Perform setup if data is provided
+    await this.setupLeadSync(orgId, userId, setupData);
 
-      await prisma.leadConfiguration.upsert({
-        where: { orgId },
-        create: {
-          orgId,
-          filters: data.filters || [
-            'inquiry',
-            'interested',
-            'quote',
-            'sales',
-            'meeting',
-          ],
-          folders: validatedFolders,
-          syncInterval: data.syncInterval || 'EVERY_HOUR',
-          excludedEmails: data.excludedEmails || [],
-          specialEmails: data.specialEmails || [],
-        },
-        update: {
-          filters: data.filters || [
-            'inquiry',
-            'interested',
-            'quote',
-            'sales',
-            'meeting',
-          ],
-          folders: validatedFolders,
-          syncInterval: data.syncInterval || 'EVERY_HOUR',
-          excludedEmails: data.excludedEmails || [],
-          specialEmails: data.specialEmails || [],
-        },
-      });
-    });
-
-    this.logger.log(`Lead sync setup completed for org ${orgId}`);
-    return { message: 'Lead sync setup successful', folders: validatedFolders };
-  }
-
-  async connectLeadSync(userId: string) {
-    this.logger.log(
-      `Connecting Microsoft lead sync for org via user ${userId}`,
-    );
-    const user = await this.prisma.user.findUnique({
-      where: { user_id: userId },
-    });
-    if (!user)
-      throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
-    if (user.role !== 'ADMIN') {
-      throw new HttpException(
-        'Only admins can connect lead sync',
-        HttpStatus.FORBIDDEN,
-      );
-    }
-
-    const orgId = user.orgId;
-    const org = await this.prisma.organization.findUnique({
+    // Re-fetch to ensure config exists
+    const updatedOrg = await this.prisma.organization.findUnique({
       where: { id: orgId },
       select: { sharedMailbox: true },
     });
-    const leadConfig = await this.prisma.leadConfiguration.findUnique({
+    leadConfig = await this.prisma.leadConfiguration.findUnique({
       where: { orgId },
     });
 
-    if (!org?.sharedMailbox || !leadConfig) {
-      this.logger.log(`Setup required for org ${orgId}`);
-      return {
-        message: 'Setup required: configure shared mailbox and lead settings',
-      };
+    if (!updatedOrg?.sharedMailbox || !leadConfig) {
+      throw new HttpException(
+        'Failed to setup lead configuration',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
-
-    await this.getPlatformCredentials(orgId); // Ensure token exists
-
-    await this.prisma.microsoftPreferences.upsert({
-      where: { orgId },
-      create: { orgId, leadSyncEnabled: true },
-      update: { leadSyncEnabled: true },
-    });
-
-    await this.scheduleOrgSync(orgId, leadConfig.syncInterval);
-    this.logger.log(`Microsoft lead sync connected for org ${orgId}`);
-    return { message: 'Lead sync connected' };
   }
+
+  await this.getPlatformCredentials(orgId);
+
+  await this.prisma.microsoftPreferences.upsert({
+    where: { orgId },
+    create: { orgId, leadSyncEnabled: true },
+    update: { leadSyncEnabled: true },
+  });
+
+  await this.scheduleOrgSync(orgId, leadConfig.syncInterval);
+  this.logger.log(`Microsoft lead sync connected for org ${orgId}`);
+  return { needsSetup: false, message: 'Connected successfully' };
+}
 
   async disconnectLeadSync(userId: string) {
     this.logger.log(

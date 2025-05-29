@@ -174,7 +174,6 @@ export class LeadController {
     data: {
       sharedMailbox: string;
       filters?: string[];
-      folders?: Record<string, string[]>;
       syncInterval?: string;
       excludedEmails?: string[];
       specialEmails?: string[];

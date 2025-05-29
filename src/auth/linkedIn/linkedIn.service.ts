@@ -10,6 +10,17 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { v4 as uuidv4 } from 'uuid';
+import { Prisma, CampaignStatus, ObjectiveType } from '@prisma/client';
+
+const mapToPrismaEnum = <T extends Record<string, string>>(
+  value: string,
+  enumObject: T,
+  defaultValue: T[keyof T] | null,
+): T[keyof T] | null => {
+  return Object.values(enumObject).includes(value as T[keyof T])
+    ? (value as T[keyof T])
+    : defaultValue;
+};
 
 interface LinkedInTokenResponse {
   access_token: string;
@@ -32,28 +43,67 @@ interface LinkedInMediaResponse {
   downloadUrlExpiresAt?: number;
 }
 
-interface LinkedInAdAccount {
-  id: string;
-  name: string;
-  status: string;
-  // Add other properties you need
+interface LinkedInAdAccountUser {
+  role: string; // e.g., "CAMPAIGN_MANAGER", "ACCOUNT_BILLING_ADMIN"
+  account: string; // e.g., "urn:li:sponsoredAccount:512263772"
+  user: string;
+  changeAuditStamps: {
+    created: { actor: string; time: number };
+    lastModified: { actor: string; time: number };
+  };
 }
 
 interface LinkedInAdAccountsResponse {
-  elements: LinkedInAdAccount[];
+  elements: LinkedInAdAccountUser[];
   paging?: {
     count: number;
     start: number;
-    links: {
-      type: string;
-      rel: string;
-      href: string;
-    }[];
+    links: { type: string; rel: string; href: string }[];
   };
 }
+
+interface LinkedInCampaignGroup {
+  id: string;
+  name: string;
+  urn: string;
+  status: string;
+  runSchedule?: {
+    start: number;
+    end?: number;
+  };
+  test: boolean;
+  changeAuditStamps: {
+    created: {
+      actor: string;
+      time: number;
+    };
+    lastModified: {
+      actor: string;
+      time: number;
+    };
+  };
+  totalBudget?: {
+    currencyCode: string;
+    amount: string;
+  };
+  servingStatuses: string[];
+  backfilled: boolean;
+  account: string;
+  objectiveType?: string;
+}
+
+interface LinkedInCampaignGroupsResponse {
+  elements: LinkedInCampaignGroup[];
+  paging?: {
+    count: number;
+    start: number;
+    links: { type: string; rel: string; href: string }[];
+  };
+  metadata?: Record<string, any>;
+}
+
 interface LinkedInOrganizationResponse {
-  id: string; // Should be "urn:li:organization:12345"
-  // Add other organization properties you expect to use
+  id: string;
 }
 
 @Injectable()
@@ -89,7 +139,6 @@ export class LinkedInService {
       },
     });
 
-    this.logger.log(`Saved LinkedIn credentials for org single-org`);
     return { message: 'LinkedIn credentials saved successfully' };
   }
 
@@ -110,9 +159,6 @@ export class LinkedInService {
     }
 
     const { clientId } = org.linkedInCreds as any;
-    this.logger.log(
-      `Testing LinkedIn connection for org single-org with clientId: ${clientId}`,
-    );
 
     const redirectUri = this.configService.get<string>(
       'LINKEDIN_REDIRECT_TEST_URI',
@@ -134,15 +180,11 @@ export class LinkedInService {
       authUrl.searchParams.append('scope', 'profile');
       authUrl.searchParams.append('state', state);
 
-      this.logger.log(
-        `LinkedIn connection test initiated: Redirect to ${authUrl.toString()}`,
-      );
       return {
         message: 'Initiate LinkedIn connection test',
         authUrl: authUrl.toString(),
       };
     } catch (error: any) {
-      this.logger.error(`LinkedIn connection test failed: ${error.message}`);
       throw new Error('Failed to initiate LinkedIn connection test');
     }
   }
@@ -185,11 +227,9 @@ export class LinkedInService {
       );
 
       const { access_token } = response.data;
-      this.logger.log(`LinkedIn connection test successful: Token acquired`);
       delete session.linkedinState; // Clean up session
       return { message: 'Connection successful', accessToken: access_token };
     } catch (error: any) {
-      this.logger.error(`LinkedIn token exchange failed: ${error.message}`);
       throw new Error('Failed to complete LinkedIn connection test');
     }
   }
@@ -233,15 +273,12 @@ export class LinkedInService {
     scopes: string[],
     profileUrl: string,
   ) {
-    this.logger.log(`Validating LinkedIn user: ${email}`);
-
     try {
       const result = await this.prisma.$transaction(async (prisma) => {
         const user = await prisma.user.findUnique({
           where: { user_id: userId },
         });
         if (!user) {
-          this.logger.error(`User not found: ${userId}`);
           throw new UnauthorizedException('User not found');
         }
 
@@ -249,7 +286,6 @@ export class LinkedInService {
           where: { id: 'single-org' },
         });
         if (!org) {
-          this.logger.log('Creating new organization: single-org');
           org = await prisma.organization.create({
             data: { id: 'single-org', name: 'ERP Organization' },
           });
@@ -260,7 +296,6 @@ export class LinkedInService {
           where: { orgId: 'single-org' },
         });
         if (!preferences?.signInMethod) {
-          this.logger.error('LinkedIn profile connection is disabled');
           throw new ForbiddenException(
             'LinkedIn profile connection is disabled',
           );
@@ -332,19 +367,13 @@ export class LinkedInService {
       });
 
       const user = result.user;
-      this.logger.log(`LinkedIn profile connected for user: ${user.email}`);
       return { user };
     } catch (error: any) {
-      this.logger.error(
-        `LinkedIn validation failed: ${error.message}`,
-        error.stack,
-      );
       throw new Error(`Failed to validate LinkedIn user: ${error.message}`);
     }
   }
 
   async connectLinkedIn(userId: string, session: any) {
-    this.logger.log(`Connecting LinkedIn for user ${userId}`);
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
@@ -359,12 +388,9 @@ export class LinkedInService {
       where: { orgId: 'single-org' },
     });
     if (!preferences?.signInMethod) {
-      this.logger.error('LinkedIn profile connection is disabled');
       throw new ForbiddenException('LinkedIn profile connection is disabled');
     }
     session.linkedinUserId = userId;
-    this.logger.log(`Set session.linkedinUserId: ${userId}`);
-    this.logger.log(`LinkedIn profile connection initiated for user ${userId}`);
     return { url: 'http://localhost:5000/auth/linkedin' };
   }
 
@@ -392,7 +418,6 @@ export class LinkedInService {
       });
     });
 
-    this.logger.log(`LinkedIn profile disconnected for user ${userId}`);
     return {
       message: 'LinkedIn profile disconnected successfully',
     };
@@ -437,8 +462,6 @@ export class LinkedInService {
   }
 
   async getStoredLinkedInProfile(userId: string) {
-    this.logger.log(`Fetching stored LinkedIn profile for user ${userId}`);
-
     try {
       const user = await this.prisma.user.findUnique({
         where: { user_id: userId },
@@ -454,9 +477,6 @@ export class LinkedInService {
 
       return user.linkedInProfile || null;
     } catch (error: any) {
-      this.logger.error(
-        `Failed to fetch stored LinkedIn profile: ${error.message}`,
-      );
       throw new InternalServerErrorException(
         'Failed to fetch LinkedIn profile data',
       );
@@ -482,19 +502,15 @@ export class LinkedInService {
     specialties: string[],
     address: any,
   ) {
-    this.logger.log(`Validating LinkedIn page: ${pageId}`);
-
     try {
       return await this.prisma.$transaction(async (prisma) => {
         const user = await prisma.user.findUnique({
           where: { user_id: userId },
         });
         if (!user) {
-          this.logger.error(`User not found: ${userId}`);
           throw new UnauthorizedException('User not found');
         }
         if (user.role !== 'ADMIN') {
-          this.logger.error('User is not an admin');
           throw new ForbiddenException('User is not an admin');
         }
 
@@ -502,7 +518,6 @@ export class LinkedInService {
           where: { id: 'single-org' },
         });
         if (!org) {
-          this.logger.log('Creating new organization: single-org');
           org = await prisma.organization.create({
             data: { id: 'single-org', name: 'ERP Organization' },
           });
@@ -512,7 +527,6 @@ export class LinkedInService {
           where: { orgId: 'single-org' },
         });
         if (!preferences?.signInMethod) {
-          this.logger.error('LinkedIn page connection is disabled');
           throw new ForbiddenException('LinkedIn page connection is disabled');
         }
 
@@ -523,11 +537,7 @@ export class LinkedInService {
 
         if (isValidUrn(logoUrn)) {
           logoUrl = await this.resolveMediaUrl(logoUrn, accessToken);
-          this.logger.log(
-            `Resolved logoUrl for URN ${logoUrn}: ${logoUrl || 'null'}`,
-          );
         } else {
-          this.logger.warn(`Invalid or missing logo URN: ${logoUrn}`);
         }
 
         if (isValidUrn(coverPhotoUrn)) {
@@ -535,31 +545,11 @@ export class LinkedInService {
             coverPhotoUrn,
             accessToken,
           );
-          this.logger.log(
-            `Resolved coverPhotoUrl for URN ${coverPhotoUrn}: ${coverPhotoUrl || 'null'}`,
-          );
         } else {
           this.logger.warn(
             `Invalid or missing cover photo URN: ${coverPhotoUrn}`,
           );
         }
-
-        this.logger.log(`Input data for page ${pageId}:`, {
-          name,
-          vanityName,
-          logoUrn,
-          logoUrl,
-          email,
-          websiteURL,
-          description,
-          logo,
-          coverPhotoUrn,
-          coverPhotoUrl,
-          staffCount,
-          specialties,
-          address,
-        });
-        // Upsert LinkedInPage
         const page = await prisma.linkedInPage.upsert({
           where: { pageId },
           update: {
@@ -593,7 +583,6 @@ export class LinkedInService {
           },
         });
 
-        // Create or update MarketingPlatform for LinkedIn
         let platform = await prisma.marketingPlatform.findFirst({
           where: { orgId: 'single-org', platform_name: 'LinkedIn' },
         });
@@ -607,7 +596,6 @@ export class LinkedInService {
           });
         }
 
-        // Upsert PlatformCredentials
         const existingCredentials = await prisma.platformCredentials.findFirst({
           where: {
             platform_id: platform.platform_id,
@@ -639,7 +627,6 @@ export class LinkedInService {
             },
           });
         }
-        this.logger.log(`LinkedIn page saved successfully: ${pageId}`, page);
         return {
           pageId,
           name,
@@ -656,19 +643,11 @@ export class LinkedInService {
         };
       });
     } catch (error: any) {
-      this.logger.error(
-        `LinkedIn page validation failed: ${error.message}`,
-        error.stack,
-      );
       throw new Error(`Failed to validate LinkedIn page: ${error.message}`);
     }
   }
 
   async connectLinkedInPage(userId: string, session: any) {
-    this.logger.log(`Connecting LinkedIn page for user ${userId}`);
-    this.logger.debug(`Current session state: ${JSON.stringify(session)}`);
-
-    this.logger.log(`Connecting LinkedIn page for user ${userId}`);
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
@@ -685,13 +664,11 @@ export class LinkedInService {
       where: { orgId: 'single-org' },
     });
     if (!preferences?.signInMethod) {
-      this.logger.error('LinkedIn page connection is disabled');
       throw new ForbiddenException('LinkedIn page connection is disabled');
     }
 
     session.linkedinPageUserId = userId;
-    this.logger.log(`Set session.linkedinPageUserId: ${userId}`);
-    this.logger.log(`LinkedIn page connection initiated for user ${userId}`);
+
     return { url: 'http://localhost:5000/auth/linkedin-page' };
   }
 
@@ -747,7 +724,6 @@ export class LinkedInService {
   }
 
   async getStoredLinkedInPages() {
-    this.logger.log(`Fetching stored LinkedIn pages for org single-org`);
     try {
       const pages = await this.prisma.linkedInPage.findMany({
         where: { organizationId: 'single-org' },
@@ -764,7 +740,22 @@ export class LinkedInService {
           staffCount: true,
           specialties: true,
           address: true,
-          adAccounts: true,
+          adAccounts: {
+            select: {
+              id: true,
+              accountUrn: true,
+              role: true,
+              campaignGroups: {
+                select: {
+                  id: true,
+                  name: true,
+                  urn: true,
+                },
+              },
+              createdAt: true,
+              updatedAt: true,
+            },
+          },
           createdAt: true,
           updatedAt: true,
         },
@@ -783,13 +774,23 @@ export class LinkedInService {
         staffCount: page.staffCount || '',
         specialties: page.specialties || [],
         address: page.address || null,
-        adAccounts: page.adAccounts || [],
+        adAccounts: page.adAccounts.map((adAccount) => ({
+          id: adAccount.id, // LinkedIn ID
+          accountUrn: adAccount.accountUrn,
+          role: adAccount.role,
+          campaignGroups: adAccount.campaignGroups.map((group) => ({
+            id: group.id,
+            name: group.name,
+            urn: group.urn || null,
+          })),
+          createdAt: adAccount.createdAt,
+          updatedAt: adAccount.updatedAt,
+        })),
         createdAt: page.createdAt,
         updatedAt: page.updatedAt,
       }));
     } catch (error: any) {
-      this.logger.error(`Failed to fetch LinkedIn pages: ${error.message}`);
-      throw new Error('Failed to fetch LinkedIn pages');
+      throw new Error(`Failed to fetch LinkedIn pages: ${error.message}`);
     }
   }
 
@@ -806,21 +807,25 @@ export class LinkedInService {
     };
 
     try {
-      const organizationUrn = `urn:li:organization:${pageId}`;
-      this.logger.log(`Using organization URN: ${organizationUrn}`);
+      const linkedInPage = await this.prisma.linkedInPage.findUnique({
+        where: { pageId },
+      });
+      if (!linkedInPage) {
+        throw new Error('LinkedIn page not found');
+      }
+
       const adAccountsUrl = 'https://api.linkedin.com/rest/adAccountUsers';
       const params = {
-      q: 'authenticatedUser',
-    };
+        q: 'authenticatedUser',
+      };
 
-      // Construct the full URL with parameters for logging
       const urlWithParams = new URL(adAccountsUrl);
       Object.entries(params).forEach(([key, value]) => {
         urlWithParams.searchParams.append(key, value as string);
       });
-      this.logger.log(`Full request URL: ${urlWithParams.toString()}`);
+      this.logger.log(`Fetching ad accounts: ${urlWithParams.toString()}`);
 
-      const response = await axios.get<LinkedInAdAccountsResponse>(
+      const adAccountsResponse = await axios.get<LinkedInAdAccountsResponse>(
         adAccountsUrl,
         {
           headers,
@@ -828,8 +833,205 @@ export class LinkedInService {
         },
       );
 
-      this.logger.log(`Successfully fetched ad accounts for page ${pageId}`);
-      return response.data.elements || [];
+      this.logger.log(
+        `Fetched ad accounts response: ${JSON.stringify(adAccountsResponse.data, null, 2)}`,
+      );
+
+      const adAccounts: { id: string; role: string }[] = [];
+      for (const element of adAccountsResponse.data.elements || []) {
+        const accountUrn = element.account;
+        const accountIdMatch = accountUrn.match(
+          /urn:li:sponsoredAccount:(\d+)/,
+        );
+        if (!accountIdMatch) {
+          this.logger.warn(`Invalid account URN: ${accountUrn}`);
+          continue;
+        }
+        const accountId = accountIdMatch[1];
+
+        adAccounts.push({
+          id: accountId,
+          role: element.role,
+        });
+
+        // Upsert AdAccount
+        await this.prisma.adAccount.upsert({
+          where: {
+            organizationId_id: {
+              organizationId: linkedInPage.organizationId,
+              id: accountId,
+            },
+          },
+          update: {
+            role: element.role,
+            userUrn: element.user,
+            accountUrn: element.account,
+            changeAuditStamps: element.changeAuditStamps,
+            updatedAt: new Date(),
+          },
+          create: {
+            id: accountId,
+            organizationId: linkedInPage.organizationId,
+            linkedInPageId: linkedInPage.id,
+            accountUrn: element.account,
+            role: element.role,
+            userUrn: element.user,
+            changeAuditStamps: element.changeAuditStamps,
+          },
+        });
+      }
+
+      // Log the mapped ad accounts
+      this.logger.log(
+        `Mapped ad accounts: ${JSON.stringify(adAccounts, null, 2)}`,
+      );
+
+      const campaignGroupsByAdAccount: {
+        adAccountId: string;
+        groups: { id: string; name: string; urn: string }[];
+      }[] = [];
+
+      for (const adAccount of adAccounts) {
+        if (!adAccount.id) {
+          this.logger.warn(
+            `Skipping campaign groups fetch for invalid ad account: ${JSON.stringify(adAccount)}`,
+          );
+          campaignGroupsByAdAccount.push({
+            adAccountId: adAccount.id || 'missing_id',
+            groups: [],
+          });
+          continue;
+        }
+        this.logger.log(
+          'Fetching campaign groups for ad account:',
+          adAccount.id,
+        );
+        try {
+          const campaignGroupsUrl = `https://api.linkedin.com/rest/adAccounts/${adAccount.id}/adCampaignGroups`;
+          const campaignGroupsParams = {
+            q: 'search',
+          };
+
+          const campaignGroupsResponse =
+            await axios.get<LinkedInCampaignGroupsResponse>(campaignGroupsUrl, {
+              headers,
+              params: campaignGroupsParams,
+            });
+
+          const campaignGroups = (
+            campaignGroupsResponse.data.elements || []
+          ).map((group) => ({
+            id: group.id.toString(),
+            urn: `urn:li:sponsoredCampaignGroup:${group.id}`,
+            name: group.name || 'Unnamed Campaign Group',
+            status: mapToPrismaEnum(
+              group.status,
+              CampaignStatus,
+              CampaignStatus.DRAFT,
+            ) as CampaignStatus,
+            runSchedule: group.runSchedule || null,
+            test: group.test,
+            changeAuditStamps: group.changeAuditStamps,
+            totalBudget: group.totalBudget || null,
+            servingStatuses: group.servingStatuses || [],
+            backfilled: group.backfilled,
+            accountUrn: group.account,
+            objectiveType: group.objectiveType
+              ? mapToPrismaEnum(group.objectiveType, ObjectiveType, null)
+              : null,
+          }));
+
+          // Fetch the AdAccount to associate campaign groups
+          const adAccountRecord = await this.prisma.adAccount.findFirst({
+            where: { id: adAccount.id },
+          });
+
+          if (!adAccountRecord) {
+            this.logger.warn(
+              `AdAccount not found for accountId: ${adAccount.id}`,
+            );
+            campaignGroupsByAdAccount.push({
+              adAccountId: adAccount.id,
+              groups: [],
+            });
+            continue;
+          }
+
+          // Upsert CampaignGroups
+          for (const group of campaignGroups) {
+            await this.prisma.campaignGroup.upsert({
+              where: { id: group.id }, // Use string id
+              update: {
+                adAccountId: adAccountRecord.id,
+                name: group.name,
+                status: group.status,
+                runSchedule: group.runSchedule
+                  ? group.runSchedule
+                  : Prisma.JsonNull,
+                test: group.test,
+                changeAuditStamps: group.changeAuditStamps,
+                totalBudget: group.totalBudget
+                  ? group.totalBudget
+                  : Prisma.JsonNull,
+                servingStatuses: group.servingStatuses,
+                backfilled: group.backfilled,
+                accountUrn: group.accountUrn,
+                objectiveType: group.objectiveType,
+                urn: group.urn,
+                updatedAt: new Date(),
+              },
+              create: {
+                id: group.id, // Use string id
+                adAccountId: adAccountRecord.id,
+                name: group.name,
+                urn: group.urn,
+                status: group.status,
+                runSchedule: group.runSchedule
+                  ? group.runSchedule
+                  : Prisma.JsonNull,
+                test: group.test,
+                changeAuditStamps: group.changeAuditStamps,
+                totalBudget: group.totalBudget
+                  ? group.totalBudget
+                  : Prisma.JsonNull,
+                servingStatuses: group.servingStatuses,
+                backfilled: group.backfilled,
+                accountUrn: group.accountUrn,
+                objectiveType: group.objectiveType,
+              },
+            });
+          }
+          campaignGroupsByAdAccount.push({
+            adAccountId: adAccount.id,
+            groups: campaignGroups.map((group) => ({
+              id: group.id,
+              name: group.name,
+              urn: group.urn,
+            })),
+          });
+
+          this.logger.log(
+            `Fetched ${campaignGroups.length} campaign groups for ad account ${adAccount.id}`,
+          );
+        } catch (groupError: any) {
+          this.logger.warn(
+            `Failed to fetch campaign groups for ad account ${adAccount.id}: ${groupError.message}`,
+          );
+          campaignGroupsByAdAccount.push({
+            adAccountId: adAccount.id,
+            groups: [],
+          });
+        }
+      }
+
+      this.logger.log(
+        `Saved ${adAccounts.length} ad accounts and ${campaignGroupsByAdAccount.reduce(
+          (sum, acc) => sum + acc.groups.length,
+          0,
+        )} campaign groups for page ${pageId}`,
+      );
+
+      return { adAccounts, campaignGroups: campaignGroupsByAdAccount };
     } catch (error: any) {
       if (error.response) {
         this.logger.error(
@@ -853,7 +1055,6 @@ export class LinkedInService {
   }
 
   async selectLinkedInPage(userId: string, pageId: string, session: any) {
-    this.logger.log(`Selecting LinkedIn page ${pageId} for user ${userId}`);
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
@@ -863,16 +1064,13 @@ export class LinkedInService {
 
     const orgProfiles = session.orgProfiles || [];
     if (!orgProfiles.some((p: any) => p.id === pageId)) {
-      this.logger.error(`Selected page not found: ${pageId}`);
       throw new Error('Selected page not found');
     }
 
     session.selectedPageId = pageId;
-    this.logger.log(`Set session.selectedPageId: ${pageId}`);
 
     const profile = orgProfiles.find((p: any) => p.id === pageId);
     if (!profile) {
-      this.logger.error(`Profile not found for pageId: ${pageId}`);
       throw new Error('Selected page profile not found');
     }
 
@@ -908,19 +1106,14 @@ export class LinkedInService {
       );
 
       try {
-        const adAccounts = await this.fetchLinkedInAdAccounts(
-          pageId,
-          session.accessToken,
+        const { adAccounts, campaignGroups } =
+          await this.fetchLinkedInAdAccounts(pageId, session.accessToken);
+        this.logger.log(
+          `Fetched ${adAccounts.length} ad accounts and ${campaignGroups.reduce(
+            (sum: number, acc: any) => sum + acc.groups.length,
+            0,
+          )} campaign groups for page ${pageId}`,
         );
-        this.logger.log(`Fetched ad accounts for page ${pageId}:`, adAccounts);
-
-        await this.prisma.linkedInPage.update({
-          where: { pageId },
-          data: {
-            adAccounts: JSON.stringify(adAccounts),
-          },
-        });
-        this.logger.log(`Saved ad accounts for page ${pageId}`);
       } catch (error: any) {
         this.logger.error(
           `Failed to fetch/save ad accounts for page ${pageId}: ${error.message}`,
@@ -932,13 +1125,9 @@ export class LinkedInService {
       session.accessToken = null;
       session.refreshToken = null;
       session.linkedinPageUserId = null;
-      this.logger.log(
-        `Page validated and session cleared for pageId: ${pageId}`,
-      );
 
       return { success: true, pageData };
     } catch (error: any) {
-      this.logger.error(`Failed to validate page ${pageId}: ${error.message}`);
       throw new Error(`Failed to validate page: ${error.message}`);
     }
   }
@@ -1003,7 +1192,6 @@ export class LinkedInService {
   }
 
   async refreshAccessToken(): Promise<LinkedInTokenResponse> {
-
     const org = await this.prisma.organization.findUnique({
       where: { id: 'single-org' },
     });
@@ -1013,63 +1201,72 @@ export class LinkedInService {
     }
 
     let platform = await this.prisma.marketingPlatform.findFirst({
-          where: { orgId: org.id, platform_name: 'LinkedIn' },
-        });
-  const credentials = await this.prisma.platformCredentials.findFirst({
-    where: {
-      platform_id: platform?.platform_id,
-      type: 'AUTH',
-      user_id: null,
-    },
-  });
-  if (!credentials || !credentials.refresh_token) {
-    this.logger.error('No refresh token found for platform');
-    throw new InternalServerErrorException('No refresh token available');
-  }
-
-  const { clientId, clientSecret } = await this.getLinkedInCredentials();
-  try {
-    const response = await axios.post<LinkedInTokenResponse>(
-      'https://www.linkedin.com/oauth/v2/accessToken',
-      new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: credentials.refresh_token,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }).toString(),
-      {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-      },
-    );
-
-    const { access_token, expires_in, refresh_token } = response.data;
-    this.logger.log(`Access token refreshed for platform ${platform?.platform_id}`);
-
-    // Update credentials
-    await this.prisma.platformCredentials.update({
-      where: { credential_id: credentials.credential_id },
-      data: {
-        access_token,
-        refresh_token: refresh_token || credentials.refresh_token,
-        expires_at: new Date(Date.now() + expires_in * 1000),
+      where: { orgId: org.id, platform_name: 'LinkedIn' },
+    });
+    const credentials = await this.prisma.platformCredentials.findFirst({
+      where: {
+        platform_id: platform?.platform_id,
+        type: 'AUTH',
+        user_id: null,
       },
     });
-
-    return response.data;
-  } catch (error: any) {
-    this.logger.error(`Failed to refresh access token: ${error.message}`);
-    if (error.response?.status === 400 && error.response.data?.error === 'invalid_request') {
-      this.logger.error('Refresh token invalid, expired, or revoked. Reauthorization required.');
-      throw new UnauthorizedException('Refresh token invalid. Please reauthorize.');
+    if (!credentials || !credentials.refresh_token) {
+      this.logger.error('No refresh token found for platform');
+      throw new InternalServerErrorException('No refresh token available');
     }
-    throw new InternalServerErrorException('Failed to refresh access token');
-  }
-}
 
-async getValidAccessToken(): Promise<string> {
-  const org = await this.prisma.organization.findUnique({
+    const { clientId, clientSecret } = await this.getLinkedInCredentials();
+    try {
+      const response = await axios.post<LinkedInTokenResponse>(
+        'https://www.linkedin.com/oauth/v2/accessToken',
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: credentials.refresh_token,
+          client_id: clientId,
+          client_secret: clientSecret,
+        }).toString(),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        },
+      );
+
+      const { access_token, expires_in, refresh_token } = response.data;
+      this.logger.log(
+        `Access token refreshed for platform ${platform?.platform_id}`,
+      );
+
+      // Update credentials
+      await this.prisma.platformCredentials.update({
+        where: { credential_id: credentials.credential_id },
+        data: {
+          access_token,
+          refresh_token: refresh_token || credentials.refresh_token,
+          expires_at: new Date(Date.now() + expires_in * 1000),
+        },
+      });
+
+      return response.data;
+    } catch (error: any) {
+      this.logger.error(`Failed to refresh access token: ${error.message}`);
+      if (
+        error.response?.status === 400 &&
+        error.response.data?.error === 'invalid_request'
+      ) {
+        this.logger.error(
+          'Refresh token invalid, expired, or revoked. Reauthorization required.',
+        );
+        throw new UnauthorizedException(
+          'Refresh token invalid. Please reauthorize.',
+        );
+      }
+      throw new InternalServerErrorException('Failed to refresh access token');
+    }
+  }
+
+  async getValidAccessToken(): Promise<string> {
+    const org = await this.prisma.organization.findUnique({
       where: { id: 'single-org' },
     });
     if (!org) {
@@ -1078,33 +1275,35 @@ async getValidAccessToken(): Promise<string> {
     }
 
     let platform = await this.prisma.marketingPlatform.findFirst({
-          where: { orgId: org.id, platform_name: 'LinkedIn' },
-        });
-  const credentials = await this.prisma.platformCredentials.findFirst({
-    where: {
-      platform_id: platform?.platform_id,
-      type: 'AUTH',
-      user_id: null,
-    },
-  });
-  if (!credentials) {
-    this.logger.error('No credentials found for platform');
-    throw new InternalServerErrorException('No credentials found');
-  }
-  if (!credentials.access_token) {
-    this.logger.error('Access token missing for platform');
-    throw new InternalServerErrorException('Access token missing');
-  }
+      where: { orgId: org.id, platform_name: 'LinkedIn' },
+    });
+    const credentials = await this.prisma.platformCredentials.findFirst({
+      where: {
+        platform_id: platform?.platform_id,
+        type: 'AUTH',
+        user_id: null,
+      },
+    });
+    if (!credentials) {
+      this.logger.error('No credentials found for platform');
+      throw new InternalServerErrorException('No credentials found');
+    }
+    if (!credentials.access_token) {
+      this.logger.error('Access token missing for platform');
+      throw new InternalServerErrorException('Access token missing');
+    }
 
-  const now = new Date();
-  if (credentials.expires_at && credentials.expires_at > now) {
-    this.logger.log(`Using existing access token for platform ${platform?.platform_id}`);
-    return credentials.access_token;
+    const now = new Date();
+    if (credentials.expires_at && credentials.expires_at > now) {
+      this.logger.log(
+        `Using existing access token for platform ${platform?.platform_id}`,
+      );
+      return credentials.access_token;
+    }
+    this.logger.log(
+      `Access token expired for platform ${platform?.platform_id}, refreshing`,
+    );
+    const { access_token } = await this.refreshAccessToken();
+    return access_token;
   }
-  this.logger.log(`Access token expired for platform ${platform?.platform_id}, refreshing`);
-  const { access_token } = await this.refreshAccessToken();
-  return access_token;
-}
-
-
 }
