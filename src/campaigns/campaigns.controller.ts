@@ -8,14 +8,29 @@ import {
   Delete,
   UseGuards,
   Req,
+  Query,
 } from '@nestjs/common';
-import { CampaignsService } from './campaigns.service';
+import { CampaignsService, LinkedInCampaignInput } from './campaigns.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { UpdateCampaignDto } from './dto/update-campaign.dto';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
+import { ObjectiveType } from '@prisma/client';
 
 interface AuthenticatedRequest extends Request {
   user?: { user_id: string; email: string; orgId: string; role: string };
+}
+
+interface BudgetRecommendationsRequest {
+  adAccountId: string;
+  objectiveType?: ObjectiveType;
+  targetingCriteria: LinkedInCampaignInput['targetingCriteria'];
+  campaignType?: string;
+  bidType?: string;
+  matchType?: string;
+}
+
+interface AudienceCountRequest {
+  targetingCriteria: LinkedInCampaignInput['targetingCriteria'];
 }
 
 @Controller('campaigns')
@@ -62,11 +77,78 @@ export class CampaignsController {
   ) {
     const ids = Array.isArray(adAccountIds) ? adAccountIds : [adAccountIds];
     const campaigns = await this.campaignsService.fetchLinkedInCampaigns(ids);
-    console.log(
-      'Fetched LinkedIn Campaigns:',
-      JSON.stringify(campaigns, null, 2),
-    );
     return { success: true, campaigns };
+  }
+
+  @Post('linkedin/create')
+  @UseGuards(JwtAuthGuard)
+  async createLinkedInCampaign(
+    @Req() req: AuthenticatedRequest,
+    @Body() data: LinkedInCampaignInput,
+  ) {
+    const user = req.user as { user_id: string; orgId: string };
+    const result = await this.campaignsService.createLinkedInCampaign(data);
+    return {
+      success: result.success,
+      message: result.message,
+    };
+  }
+
+  @Patch('linkedin/:campaignId')
+  @UseGuards(JwtAuthGuard)
+  async updateLinkedInCampaign(
+    @Req() req: AuthenticatedRequest,
+    @Param('campaignId') campaignId: string,
+    @Body() data: LinkedInCampaignInput,
+  ) {
+    const user = req.user as { user_id: string; orgId: string };
+    const result = await this.campaignsService.updateLinkedInCampaign(
+      campaignId,
+      data,
+    );
+    return {
+      success: result.success,
+      message: result.message,
+      data: result.data,
+    };
+  }
+
+  @Delete('linkedin/:campaignId')
+  @UseGuards(JwtAuthGuard)
+  async deleteLinkedInCampaign(
+    @Req() req: AuthenticatedRequest,
+    @Param('campaignId') campaignId: string,
+  ) {
+    const user = req.user as { user_id: string; orgId: string };
+    const result =
+      await this.campaignsService.deleteLinkedInCampaign(campaignId);
+    return {
+      success: result.success,
+      message: result.message,
+      data: result.data,
+    };
+  }
+
+  @Post('linkedin/budget-recommendations')
+  @UseGuards(JwtAuthGuard)
+  async getBudgetRecommendations(@Body() data: BudgetRecommendationsRequest) {
+    const result = await this.campaignsService.getBudgetRecommendations(data);
+    return {
+      success: result.success,
+      message: result.message,
+      data: result.data,
+    };
+  }
+
+  @Post('linkedin/audience-count')
+  @UseGuards(JwtAuthGuard)
+  async getAudienceCount(@Body() body: any) {
+    const result = await this.campaignsService.getAudienceCount(body);
+    return {
+      success: result.success,
+      message: result.message,
+      data: result.data,
+    };
   }
 
   @Post('linkedin/metadata')
@@ -79,6 +161,39 @@ export class CampaignsController {
       message: 'LinkedIn metadata fetched and saved successfully',
     };
   }
+
+  @Get('linkedin/metadata')
+  @UseGuards(JwtAuthGuard)
+  async getLinkedInMetadata(@Req() req: AuthenticatedRequest) {
+    const user = req.user as { user_id: string; orgId: string };
+    const metadata = await this.campaignsService.fetchLinkedInMetadata(
+      user.orgId,
+    );
+    return {
+      success: true,
+      data: metadata,
+    };
+  }
+
+  @Get('linkedin/metadata/search')
+  @UseGuards(JwtAuthGuard)
+  async searchLinkedInMetadata(
+    @Req() req: AuthenticatedRequest,
+    @Query('facet') facet: string,
+    @Query('searchTerm') searchTerm = '',
+  ) {
+    const user = req.user as { user_id: string; orgId: string };
+    const metadata = await this.campaignsService.searchLinkedInMetadata(
+      user.orgId,
+      facet,
+      searchTerm,
+    );
+    return {
+      success: true,
+      data: metadata,
+    };
+  }
+
 
   @Post('linkedin/config')
   @UseGuards(JwtAuthGuard)

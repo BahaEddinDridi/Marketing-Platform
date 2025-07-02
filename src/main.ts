@@ -3,14 +3,10 @@ import { AppModule } from './app.module';
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import * as cookieParser from 'cookie-parser';
 import * as session from 'express-session';
-import { Request, Response } from 'express';
-
+import * as bodyParser from 'body-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { abortOnError: false });
-
-
-
 
   app.use(
     session({
@@ -21,6 +17,10 @@ async function bootstrap() {
     }),
   );
   app.use(cookieParser());
+  app.use(bodyParser.json({ limit: '2mb' }));
+
+  // Increase multipart/form-data payload limit to 2MB
+  app.use(bodyParser.urlencoded({ limit: '2mb', extended: true }));
   app.enableCors({
     origin: 'http://localhost:3000',
     credentials: true,

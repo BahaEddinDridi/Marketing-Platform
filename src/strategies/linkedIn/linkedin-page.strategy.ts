@@ -78,12 +78,16 @@ export class LinkedInPageStrategy extends PassportStrategy(
         'rw_organization_admin',
         'r_organization_admin',
         'w_organization_social',
+        'r_organization_social',
+        'w_member_social',
         'rw_ads',
         'r_ads',
         'r_ads_reporting',
         'profile',
         'email',
         'openid',
+        'r_ads_leadgen_automation',
+        'r_marketing_leadgen_automation'
       ],
       passReqToCallback: true,
     });
@@ -139,7 +143,7 @@ export class LinkedInPageStrategy extends PassportStrategy(
             {
               headers: {
                 Authorization: `Bearer ${accessToken}`,
-                'LinkedIn-Version': '202411',
+                'LinkedIn-Version': '202505',
               },
             },
           );

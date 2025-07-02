@@ -22,6 +22,35 @@ const mapToPrismaEnum = <T extends Record<string, string>>(
     : defaultValue;
 };
 
+interface LinkedInAdAccountDetails {
+  test: boolean;
+  changeAuditStamps: {
+    created: {
+      actor: string;
+      time: number;
+    };
+    lastModified: {
+      actor: string;
+      time: number;
+    };
+  };
+  currency: string;
+  id: number;
+  name: string;
+  notifiedOnCampaignOptimization?: boolean;
+  notifiedOnCreativeApproval?: boolean;
+  notifiedOnCreativeRejection?: boolean;
+  notifiedOnEndOfCampaign?: boolean;
+  reference?: string;
+  servingStatuses: string[];
+  status: string;
+  type: string;
+  version?: {
+    versionTag: string;
+  };
+}
+
+
 interface LinkedInTokenResponse {
   access_token: string;
   expires_in: number;
@@ -745,11 +774,20 @@ export class LinkedInService {
               id: true,
               accountUrn: true,
               role: true,
+              name: true,
+              status: true,
+              type: true,
+              test: true,
               campaignGroups: {
                 select: {
                   id: true,
                   name: true,
                   urn: true,
+                  status: true,
+                  runSchedule: true,
+                  totalBudget: true,
+                  objectiveType: true,
+                  servingStatuses: true,
                 },
               },
               createdAt: true,
@@ -778,10 +816,19 @@ export class LinkedInService {
           id: adAccount.id, // LinkedIn ID
           accountUrn: adAccount.accountUrn,
           role: adAccount.role,
+          name: adAccount.name,
+          status: adAccount.status,
+          type: adAccount.type,
+          test: adAccount.test,
           campaignGroups: adAccount.campaignGroups.map((group) => ({
             id: group.id,
             name: group.name,
             urn: group.urn || null,
+            status: group.status,
+            runSchedule: group.runSchedule || null,
+            totalBudget: group.totalBudget || null,
+            objectiveType: group.objectiveType || null,
+            servingStatuses: group.servingStatuses || [],
           })),
           createdAt: adAccount.createdAt,
           updatedAt: adAccount.updatedAt,
@@ -800,7 +847,7 @@ export class LinkedInService {
   ): Promise<any> {
     const headers = {
       Authorization: `Bearer ${accessToken}`,
-      'LinkedIn-Version': '202411',
+      'LinkedIn-Version': '202505',
       'X-RestLi-Protocol-Version': '2.0.0',
       'Content-Type': 'application/json',
       Accept: 'application/json',
@@ -854,31 +901,66 @@ export class LinkedInService {
           role: element.role,
         });
 
+        let adAccountDetails: LinkedInAdAccountDetails | null = null;
+      try {
+        const detailsUrl = `https://api.linkedin.com/rest/adAccounts/${accountId}`;
+        this.logger.log(`Fetching ad account details: ${detailsUrl}`);
+        
+        const detailsResponse = await axios.get<LinkedInAdAccountDetails>(detailsUrl, { headers });
+        adAccountDetails = detailsResponse.data;
+        
+        this.logger.log(
+          `Fetched ad account details: ${JSON.stringify(adAccountDetails, null, 2)}`,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Failed to fetch details for ad account ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+
         // Upsert AdAccount
         await this.prisma.adAccount.upsert({
-          where: {
-            organizationId_id: {
-              organizationId: linkedInPage.organizationId,
-              id: accountId,
-            },
-          },
-          update: {
-            role: element.role,
-            userUrn: element.user,
-            accountUrn: element.account,
-            changeAuditStamps: element.changeAuditStamps,
-            updatedAt: new Date(),
-          },
-          create: {
-            id: accountId,
+        where: {
+          organizationId_id: {
             organizationId: linkedInPage.organizationId,
-            linkedInPageId: linkedInPage.id,
-            accountUrn: element.account,
-            role: element.role,
-            userUrn: element.user,
-            changeAuditStamps: element.changeAuditStamps,
+            id: accountId,
           },
-        });
+        },
+        update: {
+          role: element.role,
+          userUrn: element.user,
+          accountUrn: element.account,
+          changeAuditStamps: element.changeAuditStamps,
+          ...(adAccountDetails && {
+            name: adAccountDetails.name,
+            status: adAccountDetails.status,
+            type: adAccountDetails.type,
+            currency: adAccountDetails.currency,
+            test: adAccountDetails.test,
+            servingStatuses: adAccountDetails.servingStatuses || [],
+          }),
+          updatedAt: new Date(),
+        },
+        create: {
+          id: accountId,
+          organizationId: linkedInPage.organizationId,
+          linkedInPageId: linkedInPage.id,
+          accountUrn: element.account,
+          role: element.role,
+          userUrn: element.user,
+          changeAuditStamps: element.changeAuditStamps,
+          ...(adAccountDetails && {
+            name: adAccountDetails.name,
+            status: adAccountDetails.status,
+            type: adAccountDetails.type,
+            currency: adAccountDetails.currency,
+            test: adAccountDetails.test,
+            servingStatuses: adAccountDetails.servingStatuses || [],
+          }),
+        },
+      });
+    
       }
 
       // Log the mapped ad accounts
@@ -1095,6 +1177,8 @@ export class LinkedInService {
           'profile',
           'email',
           'openid',
+          'r_ads_leadgen_automation',
+          'r_marketing_leadgen_automation'
         ],
         profile._json.websiteURL || '',
         profile._json.description || '',
@@ -1147,7 +1231,7 @@ export class LinkedInService {
       const response = await axios.get<LinkedInMediaResponse>(url, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
-          'LinkedIn-Version': '202411', // Latest version as of 2025
+          'LinkedIn-Version': '202505', // Latest version as of 2025
           'X-RestLi-Protocol-Version': '2.0.0',
           'Content-Type': 'application/json',
         },

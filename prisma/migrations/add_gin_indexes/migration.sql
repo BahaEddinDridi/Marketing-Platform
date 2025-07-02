@@ -1,0 +1,6 @@
+-- CREATE INDEX idx_linkedin_metadata_industries ON "LinkedInMetadata" USING GIN (targeting_industries);
+-- CREATE INDEX idx_linkedin_metadata_locations ON "LinkedInMetadata" USING GIN (targeting_locations);
+-- CREATE INDEX idx_linkedin_metadata_seniorities ON "LinkedInMetadata" USING GIN (targeting_seniorities);
+-- CREATE INDEX idx_linkedin_metadata_titles ON "LinkedInMetadata" USING GIN (targeting_titles);
+-- CREATE INDEX idx_linkedin_metadata_staff_count_ranges ON "LinkedInMetadata" USING GIN (targeting_staff_count_ranges);
+-- CREATE INDEX idx_linkedin_metadata_locales ON "LinkedInMetadata" USING GIN (targeting_locales);

@@ -55,7 +55,7 @@ model LinkedInCampaignConfig {
   id              String          @id @default(uuid())
   orgId           String          @unique @default("single-org")
   organization    Organization    @relation("OrgToCampaignConfig", fields: [orgId], references: [id])
-  syncInterval    String          @default("EVERY_15_MINUTES")
+  syncInterval    String          @default("EVERY_HOUR")
   adAccounts      AdAccount[]     @relation("LinkedInCampaignConfigToAdAccount")
   campaignGroups  CampaignGroup[] @relation("LinkedInCampaignConfigToCampaignGroup")
   autoSyncEnabled Boolean         @default(true)
@@ -68,18 +68,43 @@ model AdAccount {
   id                String                   @id
   organizationId    String
   linkedInPageId    String
-  role              String // e.g., "CAMPAIGN_MANAGER", "ACCOUNT_BILLING_ADMIN"
-  userUrn           String // Corresponds to 'user' in LinkedInAdAccountUser
+  role              String
+  userUrn           String
   accountUrn        String
-  changeAuditStamps Json // Stores created and lastModified stamps
+  name              String?
+  status            String?
+  type              String?
+  currency          String?
+  test              Boolean?
+  servingStatuses   String[]
+  changeAuditStamps Json
   linkedInPage      LinkedInPage             @relation(fields: [linkedInPageId], references: [id], onDelete: Cascade)
   campaignGroups    CampaignGroup[]          @relation("AdAccountToCampaignGroup")
   campaignConfigs   LinkedInCampaignConfig[] @relation("LinkedInCampaignConfigToAdAccount")
+  audienceTemplates AudienceTemplates[]      @relation("AdAccountToAudienceTemplates")
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
+  campaigns         MarketingCampaign[]      @relation
 
   @@unique([organizationId, id])
   @@index([linkedInPageId])
+}
+
+model AudienceTemplates {
+  id                     String    @id
+  adAccountId            String
+  adAccount              AdAccount @relation("AdAccountToAudienceTemplates", fields: [adAccountId], references: [id], onDelete: Cascade)
+  account                String
+  targetingCriteria      Json
+  name                   String
+  description            String?
+  approximateMemberCount BigInt?
+  created                DateTime
+  lastModified           DateTime
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  @@index([adAccountId])
 }
 
 model CampaignGroup {
@@ -100,6 +125,7 @@ model CampaignGroup {
   campaignConfigs   LinkedInCampaignConfig[] @relation("LinkedInCampaignConfigToCampaignGroup")
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
+  campaigns         MarketingCampaign[]      @relation
 
   @@index([adAccountId])
 }
@@ -160,13 +186,13 @@ model LeadConfiguration {
 }
 
 model User {
-  user_id                String                @id @default(uuid())
+  user_id                String                  @id @default(uuid())
   firstName              String?
   lastName               String?
-  email                  String                @unique
+  email                  String                  @unique
   password               String?
-  orgId                  String                @default("single-org")
-  organization           Organization          @relation(fields: [orgId], references: [id])
+  orgId                  String                  @default("single-org")
+  organization           Organization            @relation(fields: [orgId], references: [id])
   phoneNumber            String?
   street                 String?
   city                   String?
@@ -178,18 +204,63 @@ model User {
   profileImage           String?
   lastLogin              DateTime?
   profilePicture         String?
-  role                   Role                  @default(USER)
-  status                 Status                @default(ACTIVE)
+  role                   Role                    @default(USER)
+  status                 Status                  @default(ACTIVE)
   refreshToken           String?
-  googleId               String?               @unique
-  microsoftId            String?               @unique
-  linkedInProfile        LinkedInProfile?      @relation
-  allowPersonalEmailSync Boolean               @default(false)
-  assignedLeads          Lead[]                @relation("AssignedTo")
+  googleId               String?                 @unique
+  microsoftId            String?                 @unique
+  linkedInProfile        LinkedInProfile?        @relation
+  allowPersonalEmailSync Boolean                 @default(false)
+  assignedLeads          Lead[]                  @relation("AssignedTo")
   password_tokens        PasswordResetToken[]
   credentials            PlatformCredentials[]
-  created_at             DateTime              @default(now())
-  updated_at             DateTime              @updatedAt
+  notificationPreference NotificationPreference?
+  notifications          Notification[]
+  created_at             DateTime                @default(now())
+  updated_at             DateTime                @updatedAt
+}
+
+model NotificationPreference {
+  id                       String   @id @default(uuid())
+  userId                   String   @unique
+  user                     User     @relation(fields: [userId], references: [user_id])
+
+  // Lead generation notifications
+  receiveNewLead            Boolean  @default(true)
+  
+  // Campaign lifecycle notifications
+  receiveCampaignLaunched    Boolean  @default(true)
+  receiveCampaignPaused      Boolean  @default(true)
+  receiveCampaignFailed      Boolean  @default(true)
+
+  // Performance / budget alerts
+  receivePerformanceAlert    Boolean  @default(true)
+  receiveBudgetAlert         Boolean  @default(true)
+
+  // Sync status
+  receiveSyncSuccess         Boolean  @default(true)
+  receiveSyncFailure         Boolean  @default(true)
+
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+}
+
+
+model Notification {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [user_id])
+
+  title      String
+  message    String
+  type       String // e.g., "info", "success", "warning", "error", or domain-specific types like "invoice", "stock"
+  actionUrl  String? // optional link user can follow
+  seen       Boolean @default(false)
+  isCritical Boolean @default(false) // prevent disabling if needed
+  meta       Json? // optional: store extra info like related IDs, payloads
+
+  createdAt DateTime  @default(now())
+  readAt    DateTime? // optional: track when it was seen/read
 }
 
 model LinkedInProfile {
@@ -399,7 +470,7 @@ enum CampaignType {
   TEXT_AD
   DYNAMIC
   SPOTLIGHT
-  EVENT
+  EVENT_AD
 }
 
 enum CostType {
@@ -430,6 +501,7 @@ enum OptimizationTargetType {
   MAX_LEAD
   MAX_LANDING_PAGE_VIEW
   MAX_REACH
+  MAX_VIDEO_VIEW
 }
 
 model MarketingCampaign {
@@ -462,20 +534,89 @@ model MarketingCampaign {
   version_tag              String?
   created_at               DateTime                @default(now())
   updated_at               DateTime                @updatedAt
-  performances             CampaignPerformance[]
+  Ads                      Ad[]
+  performances             CampaignAnalytics[]
   data                     Json?
+  AdAccount                AdAccount?              @relation(fields: [ad_account_id], references: [id])
+  CampaignGroup            CampaignGroup?          @relation(fields: [campaign_group_id], references: [id])
+
+  @@index([ad_account_id])
+  @@index([campaign_group_id])
+}
+
+model Ad {
+  id                  String            @id @unique
+  campaignId          String
+  campaign            MarketingCampaign @relation(fields: [campaignId], references: [campaign_id], onDelete: Cascade)
+  adAccountId         String?
+  content             String?
+  inlineContent       String?
+  name                String?
+  intendedStatus      String?
+  isServing           Boolean?
+  servingHoldReasons  String[]          @default([])
+  leadgenCallToAction Json?
+  reviewStatus        String?
+  rejectionReasons    String[]          @default([])
+  createdAt           DateTime?
+  lastModifiedAt      DateTime?
+  createdBy           String?
+  lastModifiedBy      String?
+  eventAd             Json?
+  isTest              Boolean?          @default(false)
+  changeAuditStamps   Json?
+  AdAnalytics         AdAnalytics[]
+  created_at          DateTime          @default(now())
+  updated_at          DateTime          @updatedAt
+
+  @@unique([campaignId, id])
+  @@index([campaignId])
+  @@index([adAccountId])
+}
+
+model AdAnalytics {
+  id                         String   @id @default(uuid())
+  ad                         Ad       @relation(fields: [adId], references: [id])
+  adId                       String
+  dateFetched                DateTime
+  timeGranularity            String
+  datePeriodStart            DateTime
+  datePeriodEnd              DateTime
+  impressions                Int?
+  clicks                     Int?
+  costInUsd                  Float?
+  conversions                Int?
+  qualifiedLeads             Int?
+  landingPageClicks          Int?
+  costInLocalCurrency        Float?
+  costPerQualifiedLead       Float?
+  externalWebsiteConversions Int?
+  reactions                  Int?
+  shares                     Int?
+  follows                    Int?
+  videoViews                 Int?
+  videoCompletions           Int?
+  comments                   Int?
+  averageDwellTime           Float? // seconds or ms (define in docs or API layer)
+  cardClicks                 Int?
+  revenueWonUsd              Float? // Added to match CampaignAnalytics
+  returnOnAdSpend            Float? // Added to match CampaignAnalytics
+  createdAt                  DateTime @default(now())
+
+  @@unique([adId, datePeriodStart, datePeriodEnd, timeGranularity])
+  @@index([adId, datePeriodStart, datePeriodEnd, timeGranularity])
 }
 
 model LinkedInMetadata {
   id                           String   @id @default(uuid())
   org_id                       String
   platform_id                  String
-  targeting_industries         Json? // [{ name: "Technology", value: "urn:li:industry:11" }, ...]
-  targeting_locations          Json? // [{ name: "United States", value: "urn:li:geo:100459316" }, ...]
-  targeting_seniorities        Json? // [{ name: "Senior", value: "urn:li:seniority:8" }, ...]
-  targeting_titles             Json? // [{ name: "Software Engineer", value: "urn:li:title:114" }, ...]
-  targeting_staff_count_ranges Json? // [{ name: "1-10", value: "urn:li:staffCountRange:(1,10)" }, ...]
-  targeting_locales            Json? // [{ name: "English (US)", value: "urn:li:locale:en_US" }, ...]
+  targeting_industries         Json?
+  targeting_locations          Json?
+  targeting_seniorities        Json?
+  targeting_titles             Json?
+  targeting_staff_count_ranges Json?
+  targeting_locales            Json?
   last_updated                 DateTime @updatedAt
 
   @@unique([org_id, platform_id])
@@ -493,18 +634,48 @@ model Campaign {
   @@unique([name, platform])
 }
 
-model CampaignPerformance {
-  performance_id String            @id @default(uuid())
-  campaign       MarketingCampaign @relation(fields: [campaign_id], references: [campaign_id])
-  campaign_id    String
-  clicks         Int               @default(0)
-  impressions    Int               @default(0)
-  conversions    Int               @default(0)
-  cost           Float
-  roi            Float
-  leads          Int               @default(0)
-  reach          Int               @default(0)
-  date           DateTime
-  created_at     DateTime          @default(now())
-  updated_at     DateTime          @updatedAt
+model CampaignAnalytics {
+  id                         String            @id @default(uuid())
+  campaign                   MarketingCampaign @relation(fields: [campaign_id], references: [campaign_id])
+  campaign_id                String
+  dateFetched                DateTime
+  timeGranularity            String
+  datePeriodStart            DateTime
+  datePeriodEnd              DateTime
+  impressions                Int?
+  clicks                     Int?
+  costInUsd                  Float?
+  conversions                Int?
+  qualifiedLeads             Int?
+  revenueWonUsd              Float?
+  returnOnAdSpend            Float?
+  landingPageClicks          Int?
+  costInLocalCurrency        Float?
+  costPerQualifiedLead       Float?
+  externalWebsiteConversions Int?
+  reactions                  Int?
+  shares                     Int?
+  follows                    Int?
+  videoViews                 Int?
+  videoCompletions           Int?
+  comments                   Int?
+  averageDwellTime           Float?
+  cardClicks                 Int?
+  createdAt                  DateTime          @default(now())
+
+  @@unique([campaign_id, datePeriodStart, datePeriodEnd, timeGranularity])
+  @@index([campaign_id, datePeriodStart, datePeriodEnd, timeGranularity])
+}
+
+model CampaignTemplate {
+  id            String          @id @default(uuid())
+  objective     ObjectiveType
+  name          String
+  description   String?
+  config        Json            // holds all fields: format, type, cost_type, etc.
+  targeting     Json            // flattened subset of `data` (industries, region...)
+  score         Float           // composite performance score
+  source_count  Int             // how many campaigns this is based on
+  created_at    DateTime        @default(now())
+  updated_at    DateTime        @updatedAt
 }

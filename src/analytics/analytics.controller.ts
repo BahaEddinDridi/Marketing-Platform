@@ -7,6 +7,8 @@ import {
   Param,
   Delete,
   UseGuards,
+  Query,
+  BadRequestException,
 } from '@nestjs/common';
 import { AnalyticsService } from './analytics.service';
 import { CreateAnalyticsDto } from './dto/create-analytics.dto';
@@ -17,6 +19,23 @@ import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
 export class AnalyticsController {
   constructor(private readonly analyticsService: AnalyticsService) {}
 
+
+  @Get('dashboard')
+  @UseGuards(JwtAuthGuard)
+  async getDashboardData(
+    @Query('startDate') startDate: string,
+    @Query('endDate') endDate: string,
+  ) {
+    if (!startDate || !endDate) {
+      throw new BadRequestException('startDate and endDate are required');
+    }
+    
+    return this.analyticsService.getDashboardData(
+      new Date(startDate),
+      new Date(endDate),
+    );
+  }
+  
   @Post()
   @UseGuards(JwtAuthGuard)
   create(@Body() createAnalyticsDto: CreateAnalyticsDto) {
@@ -49,4 +68,6 @@ export class AnalyticsController {
   remove(@Param('id') id: string) {
     return this.analyticsService.remove(id);
   }
+
+  
 }
