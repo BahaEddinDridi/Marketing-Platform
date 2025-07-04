@@ -129,43 +129,6 @@ export class AuthController {
     return { user };
   }
 
-  ///////////////////////// GOOGLE ////////////////////////
-
-  @Get('google')
-  @UseGuards(AuthGuard('google'))
-  async googleAuth() {
-    return { message: 'Redirecting to Google...' };
-  }
-
-  @Get('google/redirect')
-  @UseGuards(AuthGuard('google'))
-  async googleAuthRedirect(
-    @Req() req: AuthenticatedRequest,
-    @Res() res: Response,
-  ) {
-    const user = req.user as { user_id: string; email: string; orgId: string };
-    const tokens = await this.authService.generateTokens(
-      user.user_id,
-      user.email,
-      user.orgId,
-    );
-
-    res.cookie('accessToken', tokens.accessToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 15 * 60 * 1000,
-    });
-
-    res.cookie('refreshToken', tokens.refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
-    res.redirect('http://localhost:3000/signin?callback=google');
-  }
 
   ///////////////////////// MICROSOFT ////////////////////////
 

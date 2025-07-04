@@ -35,6 +35,7 @@ model Organization {
   sharedMailbox          String?
   microsoftEntraCreds    Json?
   linkedInCreds          Json?
+  googleCreds            Json?
   users                  User[]
   leads                  Lead[]
   platforms              MarketingPlatform[]
@@ -45,10 +46,27 @@ model Organization {
   AutoReplyConfigs       AutoReplyConfig[]
   linkedInPages          LinkedInPage[]
   linkedinCampaignConfig LinkedInCampaignConfig? @relation("OrgToCampaignConfig")
-  created_at             DateTime                @default(now())
-  updated_at             DateTime                @updatedAt
+  GoogleAccount          GoogleAccount[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
   @@unique([id])
+}
+
+model GoogleAccount {
+  id              String       @id @default(uuid())
+  orgId           String
+  platformId      String
+  mccId           String 
+  descriptiveName String?
+  currencyCode    String? 
+  timeZone        String? 
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  organization    Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, mccId]) 
 }
 
 model LinkedInCampaignConfig {
@@ -221,30 +239,29 @@ model User {
 }
 
 model NotificationPreference {
-  id                       String   @id @default(uuid())
-  userId                   String   @unique
-  user                     User     @relation(fields: [userId], references: [user_id])
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [user_id])
 
   // Lead generation notifications
-  receiveNewLead            Boolean  @default(true)
-  
+  receiveNewLead Boolean @default(true)
+
   // Campaign lifecycle notifications
-  receiveCampaignLaunched    Boolean  @default(true)
-  receiveCampaignPaused      Boolean  @default(true)
-  receiveCampaignFailed      Boolean  @default(true)
+  receiveCampaignLaunched Boolean @default(true)
+  receiveCampaignPaused   Boolean @default(true)
+  receiveCampaignFailed   Boolean @default(true)
 
   // Performance / budget alerts
-  receivePerformanceAlert    Boolean  @default(true)
-  receiveBudgetAlert         Boolean  @default(true)
+  receivePerformanceAlert Boolean @default(true)
+  receiveBudgetAlert      Boolean @default(true)
 
   // Sync status
-  receiveSyncSuccess         Boolean  @default(true)
-  receiveSyncFailure         Boolean  @default(true)
+  receiveSyncSuccess Boolean @default(true)
+  receiveSyncFailure Boolean @default(true)
 
-  createdAt                  DateTime @default(now())
-  updatedAt                  DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
-
 
 model Notification {
   id     String @id @default(uuid())
@@ -668,14 +685,14 @@ model CampaignAnalytics {
 }
 
 model CampaignTemplate {
-  id            String          @id @default(uuid())
-  objective     ObjectiveType
-  name          String
-  description   String?
-  config        Json            // holds all fields: format, type, cost_type, etc.
-  targeting     Json            // flattened subset of `data` (industries, region...)
-  score         Float           // composite performance score
-  source_count  Int             // how many campaigns this is based on
-  created_at    DateTime        @default(now())
-  updated_at    DateTime        @updatedAt
+  id           String        @id @default(uuid())
+  objective    ObjectiveType
+  name         String
+  description  String?
+  config       Json // holds all fields: format, type, cost_type, etc.
+  targeting    Json // flattened subset of `data` (industries, region...)
+  score        Float // composite performance score
+  source_count Int // how many campaigns this is based on
+  created_at   DateTime      @default(now())
+  updated_at   DateTime      @updatedAt
 }

@@ -15,6 +15,8 @@ import { LinkedInController } from './linkedIn/linkedIn.controller';
 import { LinkedInAuthConfigService } from 'src/middlewares/linkedIn/linkedin-auth-config.service';
 import { LinkedInStrategyProvider } from 'src/middlewares/linkedIn/linkedin-strategy.provider';
 import { LinkedInPageStrategyProvider } from 'src/middlewares/linkedIn/linkedin-page-strategy.provider';
+import { GoogleService } from './google/google.service';
+import { GoogleController } from './google/google.controller';
 
 @Module({
   imports: [
@@ -26,7 +28,7 @@ import { LinkedInPageStrategyProvider } from 'src/middlewares/linkedIn/linkedin-
     }),
     OrganizationModule,
   ],
-  controllers: [AuthController, LinkedInController],
+  controllers: [AuthController, LinkedInController, GoogleController],
   providers: [
     AuthService,
     MicrosoftAuthConfigService,
@@ -35,6 +37,7 @@ import { LinkedInPageStrategyProvider } from 'src/middlewares/linkedIn/linkedin-
     MicrosoftStrategyProvider,
     LinkedInStrategyProvider,
     LinkedInPageStrategyProvider,
+    GoogleService
   ],
   exports: [
     AuthService,

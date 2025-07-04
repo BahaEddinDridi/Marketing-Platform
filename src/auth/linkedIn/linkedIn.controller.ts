@@ -11,7 +11,6 @@ import {
 } from '@nestjs/common';
 import { LinkedInService } from './linkedIn.service';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
-import { AuthGuard } from '@nestjs/passport';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { Request } from 'express';
 import { Session as ExpressSession } from 'express-session';
