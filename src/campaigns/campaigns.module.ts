@@ -9,10 +9,14 @@ import { LinkedInAudienceService } from './linkedin/linkedinAudienceTemplates.se
 import { LinkedInAudienceController } from './linkedin/linkedinAudienceTemplates.controller';
 import { LinkedInCampaignsService } from './linkedin/linkedinCampaign.service';
 import { AnalyticsModule } from 'src/analytics/analytics.module';
+import { GoogleCampaignsService } from './google/googleCampaign.service';
+import { GoogleCampaignController } from './google/googleCampaign.controller';
+import { GoogleCampaignBudgetService } from './google/googleCampaignBudget.service';
+import { GoogleAdsService } from './google/googleAdGroup.service';
 
 @Module({
   imports: [PrismaModule, AuthModule, AnalyticsModule],
-  controllers: [CampaignsController, LinkedInAdsController, LinkedInAudienceController, ],
-  providers: [CampaignsService, LinkedInAdsService, LinkedInAudienceService, LinkedInCampaignsService],
+  controllers: [CampaignsController, LinkedInAdsController, LinkedInAudienceController, GoogleCampaignController],
+  providers: [CampaignsService, LinkedInAdsService, LinkedInAudienceService, LinkedInCampaignsService, GoogleCampaignsService, GoogleCampaignBudgetService, GoogleAdsService],
 })
 export class CampaignsModule {}

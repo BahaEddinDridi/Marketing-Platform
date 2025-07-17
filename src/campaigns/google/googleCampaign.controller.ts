@@ -1,0 +1,312 @@
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  InternalServerErrorException,
+  Logger,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UploadedFiles,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import {
+  GoogleAdsFormData,
+  GoogleCampaignsService,
+} from './googleCampaign.service';
+import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
+import { GoogleCampaignBudgetService } from './googleCampaignBudget.service';
+import {
+  AdGroupFormData,
+  GoogleAdsService,
+  GoogleResponsiveDisplayAdFormData,
+  ResponsiveSearchAdFormData,
+} from './googleAdGroup.service';
+import { AnyFilesInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
+
+@Controller('campaigns/google')
+export class GoogleCampaignController {
+    private readonly logger = new Logger(GoogleCampaignController.name);
+  
+  constructor(
+    private readonly googleCampaignsService: GoogleCampaignsService,
+    private readonly googleCampaignBudgetService: GoogleCampaignBudgetService,
+    private readonly googleAdsService: GoogleAdsService,
+  ) {}
+
+  @Get('/list')
+  @UseGuards(JwtAuthGuard)
+  async listGoogleCampaigns() {
+    return this.googleCampaignsService.listCampaignsWithAdGroupsAndAds();
+  }
+
+  @Get('/list/:campaignId')
+  @UseGuards(JwtAuthGuard)
+  async getGoogleCampaignById(@Param('campaignId') campaignId: string) {
+    return this.googleCampaignsService.getCampaignById(campaignId);
+  }
+
+  @Get('/budgets/:googleAccountId/:customerId')
+  @UseGuards(JwtAuthGuard)
+  async listCampaignBudgets(
+    @Param('googleAccountId') googleAccountId: string,
+    @Param('customerId') customerId: string,
+  ) {
+    return this.googleCampaignBudgetService.fetchCampaignBudgets(
+      googleAccountId,
+      customerId,
+    );
+  }
+  @Get('/geo-targets/:customerId')
+  @UseGuards(JwtAuthGuard)
+  async searchGeoTargetConstants(
+    @Param('customerId') customerId: string,
+    @Query('query') query: string,
+  ) {
+    if (!query) {
+      throw new InternalServerErrorException('Query parameter is required');
+    }
+    return this.googleCampaignBudgetService.searchGeoTargetConstants(
+      customerId,
+      query,
+    );
+  }
+
+  @Get('/languages/:customerId')
+  @UseGuards(JwtAuthGuard)
+  async searchLanguageConstants(
+    @Param('customerId') customerId: string,
+    @Query('query') query: string,
+  ) {
+    if (!query) {
+      throw new InternalServerErrorException('Query parameter is required');
+    }
+    console.log('query in controller', query);
+    return this.googleCampaignBudgetService.searchLanguageConstants(
+      customerId,
+      query,
+    );
+  }
+
+  @Get('/user-interests/:customerId')
+  @UseGuards(JwtAuthGuard)
+  async searchUserInterests(
+    @Param('customerId') customerId: string,
+    @Query('query') query: string,
+  ) {
+    if (!query) {
+      throw new InternalServerErrorException('Query parameter is required');
+    }
+    return this.googleCampaignBudgetService.searchUserInterests(
+      customerId,
+      query,
+    );
+  }
+
+  @Post('/create')
+  @UseGuards(JwtAuthGuard)
+  async createGoogleCampaign(@Body() formData: GoogleAdsFormData) {
+    try {
+      const campaignResourceName =
+        await this.googleCampaignsService.createCampaignWithBudget(
+          formData,
+          'single-org',
+        );
+      return { success: true, campaignResourceName };
+    } catch (error: any) {
+      throw new InternalServerErrorException(
+        `Failed to create campaign: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  @Patch('/update/:campaignId')
+  @UseGuards(JwtAuthGuard)
+  async updateGoogleCampaign(
+    @Param('campaignId') campaignId: string,
+    @Body() formData: Partial<GoogleAdsFormData>,
+  ) {
+    try {
+      const campaignResourceName =
+        await this.googleCampaignsService.updateCampaign(
+          campaignId,
+          formData.customerAccountId ?? '',
+          formData,
+          'single-org',
+        );
+      return { success: true, campaignResourceName };
+    } catch (error: any) {
+      throw new InternalServerErrorException(
+        `Failed to update campaign: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  @Delete('/delete/:campaignId')
+  @UseGuards(JwtAuthGuard)
+  async deleteGoogleCampaign(@Param('campaignId') campaignId: string) {
+    try {
+      await this.googleCampaignsService.deleteCampaign(campaignId);
+      return {
+        success: true,
+        message: `Campaign ${campaignId} deleted successfully`,
+      };
+    } catch (error: any) {
+      throw new InternalServerErrorException(
+        `Failed to delete campaign: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  @Post('/ad-groups/create')
+  @UseGuards(JwtAuthGuard)
+  async createGoogleAdGroup(
+    @Body() formData: AdGroupFormData,
+    @Query('campaignId') campaignId: string,
+  ) {
+    try {
+      const adGroupResourceName = await this.googleAdsService.createAdGroup(
+        campaignId,
+        formData,
+      );
+      return { success: true, adGroupResourceName };
+    } catch (error: any) {
+      throw new InternalServerErrorException(
+        `Failed to create ad group: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  @Get('/ad-groups/keyword-suggestions/:campaignId')
+  @UseGuards(JwtAuthGuard)
+  async getKeywordSuggestions(
+    @Param('campaignId') campaignId: string,
+    @Query('url') url?: string,
+    @Query('keywords') keywords?: string, // Comma-separated string
+  ) {
+    try {
+      const keywordArray = keywords
+        ? keywords.split(',').map((k) => k.trim())
+        : undefined;
+      const suggestions = await this.googleAdsService.getKeywordSuggestions(
+        campaignId,
+        url,
+        keywordArray,
+      );
+      return { success: true, suggestions };
+    } catch (error: any) {
+      throw new InternalServerErrorException(
+        `Failed to fetch keyword suggestions: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  @Post('/ad-groups/responsive-search-ad/create')
+  @UseGuards(JwtAuthGuard)
+  async createResponsiveSearchAd(
+    @Body() formData: ResponsiveSearchAdFormData,
+    @Query('adGroupId') adGroupId: string,
+    @Query('customerAccountId') customerAccountId: string,
+  ) {
+    try {
+      const adResourceName =
+        await this.googleAdsService.createResponsiveSearchAd(
+          adGroupId,
+          customerAccountId,
+          formData,
+        );
+      return { success: true, adResourceName };
+    } catch (error: any) {
+      throw new InternalServerErrorException(
+        `Failed to create responsive search ad: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  @Get('/image-assets/:customerId')
+  @UseGuards(JwtAuthGuard)
+  async searchImageAssets(@Param('customerId') customerId: string) {
+    try {
+      return await this.googleAdsService.searchImageAssets(customerId);
+    } catch (error: any) {
+      throw new InternalServerErrorException(
+        `Failed to fetch image assets: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+
+  @Post('/ad-groups/responsive-display-ad/create')
+  @UseGuards(JwtAuthGuard)
+  @UseInterceptors(
+    AnyFilesInterceptor({
+      storage: memoryStorage(),
+      limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    }),
+  )
+  async createResponsiveDisplayAd(
+    @Body() formData: GoogleResponsiveDisplayAdFormData,
+    @Query('adGroupId') adGroupId: string,
+    @Query('customerAccountId') customerAccountId: string,
+    @UploadedFiles() files: Express.Multer.File[],
+  ) {
+    try {
+      this.logger.debug('Received files:', files.map(f => ({ fieldname: f.fieldname, originalname: f.originalname, size: f.size })));
+
+      const parsedFormData: GoogleResponsiveDisplayAdFormData = {
+        ...formData,
+        headlines:
+          typeof formData.headlines === 'string'
+            ? JSON.parse(formData.headlines)
+            : formData.headlines,
+        descriptions:
+          typeof formData.descriptions === 'string'
+            ? JSON.parse(formData.descriptions)
+            : formData.descriptions,
+        final_urls:
+          typeof formData.final_urls === 'string'
+            ? JSON.parse(formData.final_urls)
+            : formData.final_urls,
+        marketing_images: [],
+        square_marketing_images: [],
+      };
+
+      files.forEach((file) => {
+        if (file.fieldname.startsWith('marketing_images')) {
+          parsedFormData.marketing_images.push(file);
+        } else if (file.fieldname.startsWith('square_marketing_images')) {
+          parsedFormData.square_marketing_images.push(file);
+        }
+      });
+
+      if (typeof formData.marketing_images === 'string') {
+        parsedFormData.marketing_images.push(...JSON.parse(formData.marketing_images));
+      } else if (Array.isArray(formData.marketing_images)) {
+        parsedFormData.marketing_images.push(...formData.marketing_images.filter((item): item is string => typeof item === 'string'));
+      }
+
+      if (typeof formData.square_marketing_images === 'string') {
+        parsedFormData.square_marketing_images.push(...JSON.parse(formData.square_marketing_images));
+      } else if (Array.isArray(formData.square_marketing_images)) {
+        parsedFormData.square_marketing_images.push(...formData.square_marketing_images.filter((item): item is string => typeof item === 'string'));
+      }
+
+      this.logger.debug('Parsed formData:', parsedFormData);
+
+      const adResourceName = await this.googleAdsService.createResponsiveDisplayAd(
+        adGroupId,
+        customerAccountId,
+        parsedFormData,
+      );
+      return { success: true, adResourceName };
+    } catch (error: any) {
+      throw new InternalServerErrorException(
+        `Failed to create responsive display ad: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+}

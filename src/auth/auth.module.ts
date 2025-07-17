@@ -46,6 +46,7 @@ import { GoogleController } from './google/google.controller';
     'MICROSOFT_STRATEGY',
     'LINKEDIN_STRATEGY',
     'LINKEDIN_PAGE_STRATEGY',
+    GoogleService
   ],
 })
 export class AuthModule {}

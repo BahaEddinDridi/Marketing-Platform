@@ -48,25 +48,28 @@ model Organization {
   linkedinCampaignConfig LinkedInCampaignConfig? @relation("OrgToCampaignConfig")
   GoogleAccount          GoogleAccount[]
 
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
+  created_at           DateTime               @default(now())
+  updated_at           DateTime               @updatedAt
+  GoogleCampaignConfig GoogleCampaignConfig[] @relation("OrgToCampaignConfig")
 
   @@unique([id])
 }
 
 model GoogleAccount {
-  id              String       @id @default(uuid())
-  orgId           String
-  platformId      String
-  mccId           String 
-  descriptiveName String?
-  currencyCode    String? 
-  timeZone        String? 
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
-  organization    Organization @relation(fields: [orgId], references: [id])
+  id                   String                 @id @default(uuid())
+  orgId                String
+  platformId           String
+  mccId                String
+  descriptiveName      String?
+  currencyCode         String?
+  timeZone             String?
+  clientAccounts       Json?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  organization         Organization           @relation(fields: [orgId], references: [id])
+  GoogleCampaignConfig GoogleCampaignConfig[] @relation("GoogleCampaignConfigToAdAccount")
 
-  @@unique([orgId, mccId]) 
+  @@unique([orgId, mccId])
 }
 
 model LinkedInCampaignConfig {
@@ -76,6 +79,18 @@ model LinkedInCampaignConfig {
   syncInterval    String          @default("EVERY_HOUR")
   adAccounts      AdAccount[]     @relation("LinkedInCampaignConfigToAdAccount")
   campaignGroups  CampaignGroup[] @relation("LinkedInCampaignConfigToCampaignGroup")
+  autoSyncEnabled Boolean         @default(true)
+  lastSyncedAt    DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+}
+
+model GoogleCampaignConfig {
+  id              String          @id @default(uuid())
+  orgId           String          @unique @default("single-org")
+  organization    Organization    @relation("OrgToCampaignConfig", fields: [orgId], references: [id])
+  syncInterval    String          @default("EVERY_HOUR")
+  googleAccounts  GoogleAccount[] @relation("GoogleCampaignConfigToAdAccount")
   autoSyncEnabled Boolean         @default(true)
   lastSyncedAt    DateTime?
   createdAt       DateTime        @default(now())
@@ -321,6 +336,7 @@ model MarketingPlatform {
   credentials    PlatformCredentials[]
   created_at     DateTime              @default(now())
   updated_at     DateTime              @updatedAt
+  GoogleCampaign GoogleCampaign[]
 
   @@unique([orgId, platform_name])
 }
@@ -695,4 +711,176 @@ model CampaignTemplate {
   source_count Int // how many campaigns this is based on
   created_at   DateTime      @default(now())
   updated_at   DateTime      @updatedAt
+}
+
+enum GoogleCampaignStatus {
+  ENABLED
+  PAUSED
+  REMOVED
+}
+
+enum GoogleCampaignPrimaryStatus {
+  ELIGIBLE
+  ENDED
+  LEARNING
+  LIMITED
+  MISCONFIGURED
+  NOT_ELIGIBLE
+  PAUSED
+  PENDING
+  REMOVED
+  UNKNOWN
+  UNSPECIFIED
+}
+
+enum GoogleObjectiveType {
+  SALES
+  LEADS
+  WEBSITE_TRAFFIC
+  APP_PROMOTION
+  AWARENESS
+}
+
+enum GoogleAdvertisingChannelType {
+  DEMAND_GEN
+  DISPLAY
+  HOTEL
+  LOCAL
+  LOCAL_SERVICES
+  MULTI_CHANNEL
+  PERFORMANCE_MAX
+  SEARCH
+  SHOPPING
+  SMART
+  TRAVEL
+  UNKNOWN
+  UNSPECIFIED
+  VIDEO
+}
+
+enum GoogleBudgetDeliveryMethod {
+  STANDARD
+  ACCELERATED
+}
+
+enum GoogleServingStatus {
+  ENDED
+  NONE
+  PENDING
+  SERVING
+  SUSPENDED
+  UNKNOWN
+  UNSPECIFIED
+}
+
+enum GoogleGeoTargetType {
+  PRESENCE_OR_INTEREST
+  PRESENCE
+  SEARCH_INTEREST
+}
+
+enum GoogleAdGroupStatus {
+  ENABLED
+  PAUSED
+  REMOVED
+}
+
+enum GoogleAdStatus {
+  ENABLED
+  PAUSED
+  REMOVED
+}
+
+enum GoogleAdType {
+  RESPONSIVE_SEARCH_AD
+  EXPANDED_TEXT_AD
+  RESPONSIVE_DISPLAY_AD
+  VIDEO_AD
+  SHOPPING_PRODUCT_AD
+}
+
+enum GoogleAdGroupRotation {
+  OPTIMIZE
+  ROTATE_FOREVER
+  UNKNOWN
+  UNSPECIFIED
+}
+
+enum PaymentMode {
+  CLICKS
+  CONVERSIONS
+  CONVERSION_VALUE
+  GUEST_STAY
+  UNKNOWN
+  UNSPECIFIED
+}
+
+// GoogleCampaign Model
+model GoogleCampaign {
+  campaign_id                    String                        @id @unique
+  campaign_name                  String
+  platform                       MarketingPlatform?            @relation(fields: [platform_id], references: [platform_id])
+  platform_id                    String?
+  customer_account_id            String // e.g., 8917543254
+  objective_type                 GoogleObjectiveType?
+  advertising_channel_type       GoogleAdvertisingChannelType?
+  status                         GoogleCampaignStatus          @default(PAUSED)
+  serving_status                 GoogleServingStatus?          @default(NONE)
+  bidding_strategy_type          String?
+  bidding_strategy_system_status String?
+  payment_mode                   PaymentMode?
+  primary_status                 GoogleCampaignPrimaryStatus?
+  primary_status_reasons         String[]
+  campaign_budget                Json? // e.g., { resourceName: "customers/8917543254/campaignBudgets/14714653596", amount_micros: 10000000, delivery_method: "STANDARD" }
+  network_settings               Json? // e.g., { targetGoogleSearch: true, targetSearchNetwork: true, targetContentNetwork: false, targetPartnerSearchNetwork: false }
+  geo_target_type_setting        Json? // e.g., { positiveGeoTargetType: "PRESENCE_OR_INTEREST", negativeGeoTargetType: "PRESENCE" }
+  target_cpa_micros              Float? // Target CPA in micros
+  target_roas                    Float? // Target ROAS (e.g., 5.0 for 500%)
+  geo_targets                    Json? // e.g., { include: [{ value: "1000", text: "United States" }], exclude: [] }
+  languages                      Json? // e.g., { include: [{ value: "1000", text: "English" }], exclude: [] }
+  audience_settings              Json? // e.g., { ageRanges: [], genders: [], userLists: [] }
+  start_date                     DateTime?
+  end_date                       DateTime?
+  created_at                     DateTime                      @default(now())
+  updated_at                     DateTime                      @updatedAt
+  ad_groups                      GoogleAdGroup[] // One-to-many with GoogleAdGroup
+  data                           Json? // Raw API response for additional fields
+
+  @@index([customer_account_id])
+}
+
+// GoogleAdGroup Model
+model GoogleAdGroup {
+  ad_group_id        String                 @id @unique
+  campaign_id        String
+  campaign           GoogleCampaign         @relation(fields: [campaign_id], references: [campaign_id])
+  ad_rotation_mode   GoogleAdGroupRotation?
+  name               String
+  status             GoogleAdGroupStatus    @default(PAUSED)
+  cpc_bid_micros     Float? // CPC bid in micros
+  cpm_bid_micros     Float? // CPM bid in micros
+  target_cpa_micros  Float? // Target CPA for ad group
+  target_cpm_micros  Float? // Target CPM for ad group
+  targeting_settings Json? // e.g., { keywords: [], placements: [], audiences: [] }
+  created_at         DateTime               @default(now())
+  updated_at         DateTime               @updatedAt
+  ads                GoogleAd[] // One-to-many with GoogleAd
+  data               Json? // Raw API response for additional fields
+
+  @@index([campaign_id])
+}
+
+// GoogleAd Model
+model GoogleAd {
+  ad_id       String         @id @unique
+  ad_group_id String
+  ad_group    GoogleAdGroup  @relation(fields: [ad_group_id], references: [ad_group_id])
+  status      GoogleAdStatus @default(PAUSED)
+  ad_type     GoogleAdType?
+  ad_content  Json? // e.g., { headlines: [], descriptions: [], final_urls: [] }
+  created_at  DateTime       @default(now())
+  updated_at  DateTime       @updatedAt
+  data        Json? // Raw API response for additional fields
+
+  @@index([ad_group_id])
 }

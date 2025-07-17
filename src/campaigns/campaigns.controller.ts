@@ -45,8 +45,11 @@ export class CampaignsController {
 
   @Get()
   @UseGuards(JwtAuthGuard)
-  findAll() {
-    return this.campaignsService.findAll();
+  findAll(@Query('page') page: string, @Query('pageSize') pageSize: string) {
+    return this.campaignsService.findAll(
+      parseInt(page) || 1,
+      parseInt(pageSize) || 10,
+    );
   }
 
   @Get(':id')
@@ -193,7 +196,6 @@ export class CampaignsController {
       data: metadata,
     };
   }
-
 
   @Post('linkedin/config')
   @UseGuards(JwtAuthGuard)

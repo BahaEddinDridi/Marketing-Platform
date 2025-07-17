@@ -192,45 +192,74 @@ export class CampaignsService {
     return this.prisma.marketingCampaign.create({ data: createCampaignDto });
   }
 
-  async findAll(): Promise<CampaignResponse[]> {
-    return this.prisma.marketingCampaign.findMany({
-      include: {
-        platform: {
-          select: {
-            platform_id: true,
-            platform_name: true,
-            sync_status: true,
-          },
-        },
-        Ads: {
-          select: {
-            id: true,
-            name: true,
-            intendedStatus: true,
-            isServing: true,
-            reviewStatus: true,
-            createdAt: true,
-            lastModifiedAt: true,
-          },
-        },
-        CampaignGroup: {
-          select: {
-            id: true,
-            name: true,
-            status: true,
-          },
-        },
-        AdAccount: {
-          select: {
-            id: true,
-            name: true,
-            accountUrn: true,
-            status: true,
-          },
+  async findAll(page: number = 1, pageSize: number = 5): Promise<{
+  campaigns: CampaignResponse[];
+  pagination: {
+    currentPage: number;
+    totalPages: number;
+    totalItems: number;
+  };
+}> {
+  const skip = (page - 1) * pageSize;
+  const take = pageSize;
+
+  // Fetch paginated campaigns
+  const campaigns = await this.prisma.marketingCampaign.findMany({
+    skip,
+    take,
+    orderBy: {
+      updated_at: 'desc', // Sort by updated_at, newest first
+    },
+    include: {
+      platform: {
+        select: {
+          platform_id: true,
+          platform_name: true,
+          sync_status: true,
         },
       },
-    });
-  }
+      Ads: {
+        select: {
+          id: true,
+          name: true,
+          intendedStatus: true,
+          isServing: true,
+          reviewStatus: true,
+          createdAt: true,
+          lastModifiedAt: true,
+        },
+      },
+      CampaignGroup: {
+        select: {
+          id: true,
+          name: true,
+          status: true,
+        },
+      },
+      AdAccount: {
+        select: {
+          id: true,
+          name: true,
+          accountUrn: true,
+          status: true,
+        },
+      },
+    },
+  });
+
+  // Get total count for pagination metadata
+  const totalItems = await this.prisma.marketingCampaign.count();
+  const totalPages = Math.ceil(totalItems / pageSize);
+  this.logger.log("totalItems + totalPages", totalItems, totalPages)
+  return {
+    campaigns,
+    pagination: {
+      currentPage: page,
+      totalPages,
+      totalItems,
+    },
+  };
+}
 
   async findOne(campaign_id: string): Promise<CampaignResponse | null> {
     return this.prisma.marketingCampaign.findUnique({
