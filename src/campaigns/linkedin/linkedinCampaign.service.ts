@@ -14,6 +14,7 @@ import axios from 'axios';
 import Bottleneck from 'bottleneck';
 import { LinkedInAnalyticsService } from 'src/analytics/linkedin/linkedinAnalytics.service';
 import { CampaignStatus, ObjectiveType, Status } from '@prisma/client';
+import { NotificationsService } from 'src/notifications/notifications.service';
 
 @Injectable()
 export class LinkedInCampaignsService {
@@ -38,6 +39,7 @@ export class LinkedInCampaignsService {
     private readonly linkedInAdsService: LinkedInAdsService,
     private readonly campaignsService: CampaignsService,
     private readonly linkedInAnalyticsService: LinkedInAnalyticsService,
+    private readonly notificationService: NotificationsService,
   ) {
     this.startDynamicSync();
   }
@@ -85,6 +87,16 @@ export class LinkedInCampaignsService {
         await this.limiter.schedule(() =>
           this.syncCampaignsAndAnalytics(orgId),
         );
+        await this.notificationService.notifyUsersOfOrg(
+          orgId,
+          'receiveSyncSuccess',
+          {
+            title: 'LinkedIn Sync Successful',
+            message: `LinkedIn campaigns were successfully synced for your organization.`,
+            type: 'success',
+            meta: { orgId },
+          },
+        );
         this.logger.log(`Sync completed for org ${orgId}`);
       } catch (error: any) {
         this.logger.error(
@@ -100,9 +112,11 @@ export class LinkedInCampaignsService {
 
   private async startDynamicSync() {
     this.logger.log('Starting dynamic sync for single-org');
+    const orgId = 'single-org';
+
     try {
       const config = await this.prisma.linkedInCampaignConfig.findUnique({
-        where: { orgId: 'single-org' },
+        where: { orgId },
         select: {
           orgId: true,
           autoSyncEnabled: true,
@@ -110,12 +124,27 @@ export class LinkedInCampaignsService {
         },
       });
 
-      if (!config) {
-        this.logger.warn('LinkedInCampaignConfig for single-org not found');
+      const existingJob = this.jobs.get(orgId);
+
+      if (!config || !config.autoSyncEnabled) {
+        if (existingJob) {
+          existingJob.cancel();
+          this.jobs.delete(orgId);
+          this.logger.log(
+            `Cancelled sync job for org ${orgId} as config is missing or auto-sync is disabled`,
+          );
+        }
+        if (!config) {
+          this.logger.warn('LinkedInCampaignConfig for single-org not found');
+        } else {
+          this.logger.log(
+            `Auto-sync disabled for org ${orgId}, no sync scheduled`,
+          );
+        }
         return;
       }
 
-      this.logger.log('Found LinkedInCampaignConfig for single-org to sync');
+      // Schedule a new job only if auto-sync is enabled and no job exists
       if (config.autoSyncEnabled && !this.jobs.has(config.orgId)) {
         await this.scheduleOrgSync(config.orgId, config.syncInterval);
       }
@@ -545,7 +574,154 @@ export class LinkedInCampaignsService {
     }
   }
 
+  async createOrUpdateLinkedInCampaignConfig(
+    orgId: string,
+    config: {
+      syncInterval: string;
+      autoSyncEnabled: boolean;
+      adAccountIds: string[];
+      campaignGroupIds: string[];
+    },
+  ) {
+    this.logger.log(
+      `Creating or updating LinkedInCampaignConfig for org: ${orgId}`,
+    );
 
+    // Validate inputs
+    const validSyncIntervals = [
+      'EVERY_20_SECONDS',
+      'EVERY_30_MINUTES',
+      'EVERY_HOUR',
+      'EVERY_2_HOURS',
+      'EVERY_3_HOURS',
+    ];
+    if (!validSyncIntervals.includes(config.syncInterval)) {
+      this.logger.error(`Invalid syncInterval: ${config.syncInterval}`);
+      throw new Error(
+        `syncInterval must be one of: ${validSyncIntervals.join(', ')}`,
+      );
+    }
 
-  
+    // Validate org exists
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+    });
+    if (!org) {
+      this.logger.error(`Organization not found for id: ${orgId}`);
+      throw new Error('Organization not found');
+    }
+
+    // Validate LinkedIn platform exists
+    const platform = await this.prisma.marketingPlatform.findFirst({
+      where: { orgId, platform_name: 'LinkedIn' },
+    });
+    if (!platform) {
+      this.logger.error('LinkedIn platform not found for organization');
+      throw new Error('LinkedIn platform not configured');
+    }
+    this.logger.log('ad accounts ids', config.adAccountIds);
+    this.logger.log('campaign group ids', config.campaignGroupIds);
+    // Validate adAccountIds
+    if (config.adAccountIds.length > 0) {
+      const adAccounts = await this.prisma.adAccount.findMany({
+        where: {
+          id: { in: config.adAccountIds },
+          organizationId: orgId,
+        },
+        select: { id: true },
+      });
+      if (adAccounts.length !== config.adAccountIds.length) {
+        this.logger.error(
+          'One or more adAccountIds are invalid or do not belong to the organization',
+        );
+        throw new Error('Invalid ad account IDs');
+      }
+    }
+
+    // Validate campaignGroupIds
+    if (config.campaignGroupIds.length > 0) {
+      const campaignGroups = await this.prisma.campaignGroup.findMany({
+        where: {
+          id: { in: config.campaignGroupIds },
+          adAccount: { organizationId: orgId },
+        },
+        select: { id: true },
+      });
+      if (campaignGroups.length !== config.campaignGroupIds.length) {
+        this.logger.error(
+          'One or more campaignGroupIds are invalid or do not belong to the organization',
+        );
+        throw new Error('Invalid campaign group IDs');
+      }
+    }
+
+    // Upsert LinkedInCampaignConfig
+    try {
+      const configRecord = await this.prisma.linkedInCampaignConfig.upsert({
+        where: { orgId },
+        update: {
+          syncInterval: config.syncInterval,
+          autoSyncEnabled: config.autoSyncEnabled,
+          adAccounts: {
+            set: config.adAccountIds.map((id) => ({ id })),
+          },
+          campaignGroups: {
+            set: config.campaignGroupIds.map((id) => ({ id })),
+          },
+          updatedAt: new Date(),
+        },
+        create: {
+          orgId,
+          syncInterval: config.syncInterval,
+          autoSyncEnabled: config.autoSyncEnabled,
+          adAccounts: {
+            connect: config.adAccountIds.map((id) => ({ id })),
+          },
+          campaignGroups: {
+            connect: config.campaignGroupIds.map((id) => ({ id })),
+          },
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        include: {
+          adAccounts: {
+            select: {
+              id: true,
+              accountUrn: true,
+              role: true,
+            },
+          },
+          campaignGroups: {
+            select: {
+              id: true,
+              name: true,
+              urn: true,
+            },
+          },
+        },
+      });
+
+      this.logger.log(
+        `Successfully saved LinkedInCampaignConfig for org: ${orgId}`,
+      );
+
+      await this.startDynamicSync();
+      return {
+        id: configRecord.id,
+        orgId: configRecord.orgId,
+        syncInterval: configRecord.syncInterval,
+        autoSyncEnabled: configRecord.autoSyncEnabled,
+        lastSyncedAt: configRecord.lastSyncedAt,
+        createdAt: configRecord.createdAt,
+        updatedAt: configRecord.updatedAt,
+        adAccounts: configRecord.adAccounts,
+        campaignGroups: configRecord.campaignGroups,
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to save LinkedInCampaignConfig: ${error.message}`,
+      );
+      throw new Error('Failed to save LinkedIn campaign configuration');
+    }
+  }
 }

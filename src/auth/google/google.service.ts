@@ -554,10 +554,7 @@ async disconnectMCC(userId: string) {
       this.logger.error(`User with ID ${userId} not found`);
       throw new UnauthorizedException('User not found');
     }
-    if (user.role !== 'ADMIN') {
-      this.logger.warn(`User ${userId} attempted to fetch MCC info without ADMIN role`);
-      throw new ForbiddenException('Only admins can fetch MCC info');
-    }
+
 
     // Get organization
     const org = await this.prisma.organization.findUnique({
@@ -594,6 +591,7 @@ async disconnectMCC(userId: string) {
     return {
       message: 'MCC info retrieved successfully',
       mccInfo: {
+        id: mccAccount.id,
         mccId: mccAccount.mccId,
         descriptiveName: mccAccount.descriptiveName,
         currencyCode: mccAccount.currencyCode,

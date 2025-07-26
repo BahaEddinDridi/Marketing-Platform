@@ -13,10 +13,30 @@ import { GoogleCampaignsService } from './google/googleCampaign.service';
 import { GoogleCampaignController } from './google/googleCampaign.controller';
 import { GoogleCampaignBudgetService } from './google/googleCampaignBudget.service';
 import { GoogleAdsService } from './google/googleAdGroup.service';
+import { MetaCampaignService } from './meta/metaCampaign.service';
+import { MetaCampaignController } from './meta/metaCampaign.controller';
+import { MetaAdSetService } from './meta/metaAdSet.service';
+import { NotificationsModule } from 'src/notifications/notifications.module';
 
 @Module({
-  imports: [PrismaModule, AuthModule, AnalyticsModule],
-  controllers: [CampaignsController, LinkedInAdsController, LinkedInAudienceController, GoogleCampaignController],
-  providers: [CampaignsService, LinkedInAdsService, LinkedInAudienceService, LinkedInCampaignsService, GoogleCampaignsService, GoogleCampaignBudgetService, GoogleAdsService],
+  imports: [PrismaModule, AuthModule, AnalyticsModule, NotificationsModule],
+  controllers: [
+    CampaignsController,
+    LinkedInAdsController,
+    LinkedInAudienceController,
+    GoogleCampaignController,
+    MetaCampaignController
+  ],
+  providers: [
+    CampaignsService,
+    LinkedInAdsService,
+    LinkedInAudienceService,
+    LinkedInCampaignsService,
+    GoogleCampaignsService,
+    GoogleCampaignBudgetService,
+    GoogleAdsService,
+    MetaCampaignService,
+    MetaAdSetService
+  ],
 })
 export class CampaignsModule {}

@@ -29,8 +29,10 @@
     "@nestjs/mapped-types": "*",
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.0.12",
+    "@nestjs/platform-socket.io": "^11.1.5",
     "@nestjs/schedule": "^5.0.1",
     "@nestjs/throttler": "^6.4.0",
+    "@nestjs/websockets": "^11.1.5",
     "@prisma/client": "^6.4.1",
     "@types/bcryptjs": "^2.4.6",
     "axios": "^1.8.4",
@@ -56,6 +58,7 @@
     "passport-microsoft": "^2.1.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "socket.io": "^4.8.1",
     "striptags": "^3.2.0"
   },
   "devDependencies": {

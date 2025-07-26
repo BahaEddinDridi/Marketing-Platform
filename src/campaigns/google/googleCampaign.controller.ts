@@ -5,6 +5,7 @@ import {
   Get,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
   Param,
   Patch,
   Post,
@@ -30,8 +31,8 @@ import { memoryStorage } from 'multer';
 
 @Controller('campaigns/google')
 export class GoogleCampaignController {
-    private readonly logger = new Logger(GoogleCampaignController.name);
-  
+  private readonly logger = new Logger(GoogleCampaignController.name);
+
   constructor(
     private readonly googleCampaignsService: GoogleCampaignsService,
     private readonly googleCampaignBudgetService: GoogleCampaignBudgetService,
@@ -239,7 +240,6 @@ export class GoogleCampaignController {
     }
   }
 
-
   @Post('/ad-groups/responsive-display-ad/create')
   @UseGuards(JwtAuthGuard)
   @UseInterceptors(
@@ -255,7 +255,14 @@ export class GoogleCampaignController {
     @UploadedFiles() files: Express.Multer.File[],
   ) {
     try {
-      this.logger.debug('Received files:', files.map(f => ({ fieldname: f.fieldname, originalname: f.originalname, size: f.size })));
+      this.logger.debug(
+        'Received files:',
+        files.map((f) => ({
+          fieldname: f.fieldname,
+          originalname: f.originalname,
+          size: f.size,
+        })),
+      );
 
       const parsedFormData: GoogleResponsiveDisplayAdFormData = {
         ...formData,
@@ -284,28 +291,89 @@ export class GoogleCampaignController {
       });
 
       if (typeof formData.marketing_images === 'string') {
-        parsedFormData.marketing_images.push(...JSON.parse(formData.marketing_images));
+        parsedFormData.marketing_images.push(
+          ...JSON.parse(formData.marketing_images),
+        );
       } else if (Array.isArray(formData.marketing_images)) {
-        parsedFormData.marketing_images.push(...formData.marketing_images.filter((item): item is string => typeof item === 'string'));
+        parsedFormData.marketing_images.push(
+          ...formData.marketing_images.filter(
+            (item): item is string => typeof item === 'string',
+          ),
+        );
       }
 
       if (typeof formData.square_marketing_images === 'string') {
-        parsedFormData.square_marketing_images.push(...JSON.parse(formData.square_marketing_images));
+        parsedFormData.square_marketing_images.push(
+          ...JSON.parse(formData.square_marketing_images),
+        );
       } else if (Array.isArray(formData.square_marketing_images)) {
-        parsedFormData.square_marketing_images.push(...formData.square_marketing_images.filter((item): item is string => typeof item === 'string'));
+        parsedFormData.square_marketing_images.push(
+          ...formData.square_marketing_images.filter(
+            (item): item is string => typeof item === 'string',
+          ),
+        );
       }
 
       this.logger.debug('Parsed formData:', parsedFormData);
 
-      const adResourceName = await this.googleAdsService.createResponsiveDisplayAd(
-        adGroupId,
-        customerAccountId,
-        parsedFormData,
-      );
+      const adResourceName =
+        await this.googleAdsService.createResponsiveDisplayAd(
+          adGroupId,
+          customerAccountId,
+          parsedFormData,
+        );
       return { success: true, adResourceName };
     } catch (error: any) {
       throw new InternalServerErrorException(
         `Failed to create responsive display ad: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  @Post('/config')
+  @UseGuards(JwtAuthGuard)
+  async createOrUpdateGoogleCampaignConfig(
+    @Body()
+    config: {
+      syncInterval: string;
+      autoSyncEnabled: boolean;
+      googleAccountsIds: string[];
+    },
+    @Query('orgId') orgId: string = 'single-org',
+  ) {
+    try {
+      const configRecord =
+        await this.googleCampaignsService.createOrUpdateGoogleCampaignConfig(
+          orgId,
+          config,
+        );
+      return { success: true, config: configRecord };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to create/update GoogleCampaignConfig: ${error.message}`,
+      );
+      throw new InternalServerErrorException(
+        `Failed to create/update Google campaign configuration: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  @Get('/config/:orgId')
+  @UseGuards(JwtAuthGuard)
+  async getGoogleCampaignConfigByOrgId(
+    @Param('orgId') orgId: string = 'single-org',
+  ) {
+    try {
+      const configRecord =
+        await this.googleCampaignsService.getGoogleCampaignConfigByOrgId(orgId);
+      return { success: true, config: configRecord };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to fetch GoogleCampaignConfig: ${error.message}`,
+      );
+
+      throw new InternalServerErrorException(
+        `Failed to fetch Google campaign configuration: ${error.message || 'Unknown error'}`,
       );
     }
   }

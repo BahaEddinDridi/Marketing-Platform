@@ -19,6 +19,7 @@ import { OrganizationModule } from './organization/organization.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EmailTemplateModule } from './email-template/email-template.module';
 import { AutoReplyModule } from './auto-reply/auto-reply.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { AutoReplyModule } from './auto-reply/auto-reply.module';
     OrganizationModule,
     EmailTemplateModule,
     AutoReplyModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [

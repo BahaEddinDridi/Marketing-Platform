@@ -36,6 +36,7 @@ model Organization {
   microsoftEntraCreds    Json?
   linkedInCreds          Json?
   googleCreds            Json?
+  metaCreds              Json?
   users                  User[]
   leads                  Lead[]
   platforms              MarketingPlatform[]
@@ -47,10 +48,12 @@ model Organization {
   linkedInPages          LinkedInPage[]
   linkedinCampaignConfig LinkedInCampaignConfig? @relation("OrgToCampaignConfig")
   GoogleAccount          GoogleAccount[]
+  MetaAccount            MetaAccount[]
 
   created_at           DateTime               @default(now())
   updated_at           DateTime               @updatedAt
   GoogleCampaignConfig GoogleCampaignConfig[] @relation("OrgToCampaignConfig")
+  MetaCampaignConfig   MetaCampaignConfig[]   @relation("OrgToMetaCampaignConfig")
 
   @@unique([id])
 }
@@ -70,6 +73,22 @@ model GoogleAccount {
   GoogleCampaignConfig GoogleCampaignConfig[] @relation("GoogleCampaignConfigToAdAccount")
 
   @@unique([orgId, mccId])
+}
+
+model MetaAccount {
+  id                String       @id @default(uuid())
+  orgId             String
+  platformId        String
+  businessManagerId String
+  descriptiveName   String?
+  currencyCode      String?
+  timeZone          String?
+  adAccounts        Json?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  organization      Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, businessManagerId])
 }
 
 model LinkedInCampaignConfig {
@@ -95,6 +114,18 @@ model GoogleCampaignConfig {
   lastSyncedAt    DateTime?
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
+}
+
+model MetaCampaignConfig {
+  id              String       @id @default(uuid())
+  orgId           String       @unique @default("single-org")
+  organization    Organization @relation("OrgToMetaCampaignConfig", fields: [orgId], references: [id])
+  syncInterval    String       @default("EVERY_HOUR")
+  adAccountIds    String[]     @default([])
+  autoSyncEnabled Boolean      @default(true)
+  lastSyncedAt    DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 }
 
 model AdAccount {
@@ -337,6 +368,7 @@ model MarketingPlatform {
   created_at     DateTime              @default(now())
   updated_at     DateTime              @updatedAt
   GoogleCampaign GoogleCampaign[]
+  MetaCampaign   MetaCampaign[]
 
   @@unique([orgId, platform_name])
 }
@@ -883,4 +915,225 @@ model GoogleAd {
   data        Json? // Raw API response for additional fields
 
   @@index([ad_group_id])
+}
+
+enum MetaBidStrategy {
+  LOWEST_COST_WITHOUT_CAP
+  LOWEST_COST_WITH_BID_CAP
+  COST_CAP
+  LOWEST_COST_WITH_MIN_ROAS
+}
+
+enum MetaBuyingType {
+  AUCTION
+  RESERVED
+}
+
+enum MetaCampaignOptimizationType {
+  NONE
+  ICO_ONLY
+}
+
+enum MetaObjective {
+  APP_INSTALLS
+  BRAND_AWARENESS
+  CONVERSIONS
+  EVENT_RESPONSES
+  LEAD_GENERATION
+  LINK_CLICKS
+  LOCAL_AWARENESS
+  MESSAGES
+  OFFER_CLAIMS
+  OUTCOME_APP_PROMOTION
+  OUTCOME_AWARENESS
+  OUTCOME_ENGAGEMENT
+  OUTCOME_LEADS
+  OUTCOME_SALES
+  OUTCOME_TRAFFIC
+  PAGE_LIKES
+  POST_ENGAGEMENT
+  PRODUCT_CATALOG_SALES
+  REACH
+  STORE_VISITS
+  VIDEO_VIEWS
+}
+
+enum MetaSpecialAdCategory {
+  NONE
+  EMPLOYMENT
+  HOUSING
+  CREDIT
+  ISSUES_ELECTIONS_POLITICS
+  ONLINE_GAMBLING_AND_GAMING
+  FINANCIAL_PRODUCTS_SERVICES
+}
+
+enum MetaCampaignStatus {
+  ACTIVE
+  PAUSED
+  DELETED
+  ARCHIVED
+}
+
+enum MetaEffectiveStatus {
+  ACTIVE
+  PAUSED
+  DELETED
+  ARCHIVED
+  IN_PROCESS
+  WITH_ISSUES
+}
+
+model MetaCampaign {
+  campaign_id   String             @id @unique
+  campaign_name String
+  platform      MarketingPlatform? @relation(fields: [platform_id], references: [platform_id])
+  platform_id   String?
+  ad_account_id String // e.g., act_123456789
+
+  objective         MetaObjective
+  bid_strategy      MetaBidStrategy?
+  buying_type       MetaBuyingType?               @default(AUCTION)
+  optimization_type MetaCampaignOptimizationType? @default(NONE)
+
+  special_ad_categories MetaSpecialAdCategory[] @default([NONE])
+  status                MetaCampaignStatus      @default(PAUSED)
+  effective_status      MetaEffectiveStatus?    @default(PAUSED)
+
+  daily_budget     Int? // in minor units (e.g., cents)
+  lifetime_budget  Int? // in minor units (e.g., cents)
+  spend_cap        Int? // total max spend limit
+  budget_remaining String?
+
+  issues_info Json?
+
+  start_time DateTime?
+  end_time   DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  data      Json? // raw API response
+  MetaAdSet MetaAdSet[] 
+
+  @@index([ad_account_id])
+}
+
+enum MetaAdSetStatus {
+  ACTIVE
+  PAUSED
+  DELETED
+  ARCHIVED
+}
+
+enum MetaBillingEvent {
+  APP_INSTALLS
+  CLICKS
+  IMPRESSIONS
+  LINK_CLICKS
+  NONE
+  OFFER_CLAIMS
+  PAGE_LIKES
+  POST_ENGAGEMENT
+  THRUPLAY
+  PURCHASE
+  LISTING_INTERACTION
+}
+
+enum MetaOptimizationGoal {
+  NONE
+  APP_INSTALLS
+  AD_RECALL_LIFT
+  ENGAGED_USERS
+  EVENT_RESPONSES
+  IMPRESSIONS
+  LEAD_GENERATION
+  QUALITY_LEAD
+  LINK_CLICKS
+  OFFSITE_CONVERSIONS
+  PAGE_LIKES
+  POST_ENGAGEMENT
+  QUALITY_CALL
+  REACH
+  LANDING_PAGE_VIEWS
+  VISIT_INSTAGRAM_PROFILE
+  VALUE
+  THRUPLAY
+  DERIVED_EVENTS
+  APP_INSTALLS_AND_OFFSITE_CONVERSIONS
+  CONVERSATIONS
+  IN_APP_VALUE
+  MESSAGING_PURCHASE_CONVERSION
+  SUBSCRIBERS
+  REMINDERS_SET
+  MEANINGFUL_CALL_ATTEMPT
+  PROFILE_VISIT
+  PROFILE_AND_PAGE_ENGAGEMENT
+  ADVERTISER_SILOED_VALUE
+  AUTOMATIC_OBJECTIVE
+  MESSAGING_APPOINTMENT_CONVERSION
+}
+
+enum MetaPacingType {
+  STANDARD
+  NO_PACING
+}
+
+model MetaAdSet {
+  ad_set_id   String       @id @unique
+  campaign_id String
+  campaign    MetaCampaign @relation(fields: [campaign_id], references: [campaign_id])
+
+  name              String
+  status            MetaAdSetStatus       @default(PAUSED)
+  billing_event     MetaBillingEvent?
+  optimization_goal MetaOptimizationGoal?
+
+  bid_amount Int? // in minor units (e.g., 100 = $1.00)
+
+  daily_budget    Int? // in minor units
+  lifetime_budget Int? // in minor units
+  pacing_type     MetaPacingType[] @default([STANDARD])
+
+  start_time DateTime?
+  end_time   DateTime?
+
+  targeting       Json? // demographics, locations, interests, etc.
+  promoted_object Json?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  data       Json? // raw API 
+  MetaAd     MetaAd[]
+
+  @@index([campaign_id])
+}
+
+enum MetaAdStatus {
+  ACTIVE
+  PAUSED
+  DELETED
+  ARCHIVED
+}
+
+model MetaAd {
+  ad_id     String    @id @unique
+  ad_set_id String
+  ad_set    MetaAdSet @relation(fields: [ad_set_id], references: [ad_set_id])
+
+  ad_name String
+  status  MetaAdStatus @default(PAUSED)
+
+  creative Json? // creative fields: headlines, media, call_to_action, etc.
+  tracking Json? // tracking specs (e.g. pixel, conversions)
+  insights Json? // optional performance metrics
+
+  effective_status MetaEffectiveStatus? @default(PAUSED)
+  issues_info      Json? // potential delivery issues
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  data       Json? // raw API response
+
+  @@index([ad_set_id])
 }

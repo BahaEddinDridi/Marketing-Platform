@@ -33,6 +33,7 @@ import {
   GoogleBudgetDeliveryMethod,
 } from '@prisma/client';
 import axios from 'axios';
+import { NotificationsService } from 'src/notifications/notifications.service';
 
 interface CampaignBudget {
   resourceName: string;
@@ -40,7 +41,6 @@ interface CampaignBudget {
   delivery_method?: string;
   explicitly_shared?: boolean;
 }
-
 
 export interface GoogleAdsFormData {
   customerAccountId: string;
@@ -263,6 +263,7 @@ export class GoogleCampaignsService {
     private readonly prisma: PrismaService,
     private readonly googleService: GoogleService,
     private readonly configService: ConfigService,
+    private readonly notificationService: NotificationsService,
   ) {
     this.startDynamicSync();
   }
@@ -296,14 +297,187 @@ export class GoogleCampaignsService {
     return match[1]; // e.g., "8917543254"
   }
 
+  async createOrUpdateGoogleCampaignConfig(
+    orgId: string,
+    config: {
+      syncInterval: string;
+      autoSyncEnabled: boolean;
+      googleAccountsIds: string[];
+    },
+  ) {
+    this.logger.log(
+      `Creating or updating GoogleCampaignConfig for org: ${orgId}`,
+    );
+
+    // Validate sync interval
+    const validSyncIntervals = [
+      'EVERY_20_SECONDS',
+      'EVERY_30_MINUTES',
+      'EVERY_HOUR',
+      'EVERY_2_HOURS',
+      'EVERY_3_HOURS',
+    ];
+    if (!validSyncIntervals.includes(config.syncInterval)) {
+      this.logger.error(`Invalid syncInterval: ${config.syncInterval}`);
+      throw new Error(
+        `syncInterval must be one of: ${validSyncIntervals.join(', ')}`,
+      );
+    }
+
+    // Validate organization
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+    });
+    if (!org) {
+      this.logger.error(`Organization not found for id: ${orgId}`);
+      throw new Error('Organization not found');
+    }
+
+    // Validate Google platform
+    const platform = await this.prisma.marketingPlatform.findFirst({
+      where: { orgId, platform_name: 'Google' },
+    });
+    if (!platform) {
+      this.logger.error('Google platform not found for organization');
+      throw new Error('Google platform not configured');
+    }
+
+    // Validate googleAccountsIds
+    if (config.googleAccountsIds.length > 0) {
+      const googleAccounts = await this.prisma.googleAccount.findMany({
+        where: { id: { in: config.googleAccountsIds }, orgId },
+        select: { id: true },
+      });
+      if (googleAccounts.length !== config.googleAccountsIds.length) {
+        this.logger.error(
+          'One or more googleAccountsIds are invalid or do not belong to the organization',
+        );
+        throw new Error('Invalid Google account IDs');
+      }
+    }
+
+    // Prepare connection data for googleAccounts relation
+    const googleAccountsConnect = config.googleAccountsIds.map((id) => ({
+      id,
+    }));
+
+    // Upsert GoogleCampaignConfig
+    try {
+      const configRecord = await this.prisma.googleCampaignConfig.upsert({
+        where: { orgId },
+        update: {
+          syncInterval: config.syncInterval,
+          autoSyncEnabled: config.autoSyncEnabled,
+          googleAccounts: {
+            set: [], // Disconnect existing accounts
+            connect: googleAccountsConnect, // Connect new accounts
+          },
+          updatedAt: new Date(),
+        },
+        create: {
+          orgId,
+          syncInterval: config.syncInterval,
+          autoSyncEnabled: config.autoSyncEnabled,
+          googleAccounts: {
+            connect: googleAccountsConnect,
+          },
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+
+      this.logger.log(
+        `Successfully saved GoogleCampaignConfig for org: ${orgId}`,
+      );
+
+      // Reset dynamic sync
+      await this.startDynamicSync();
+
+      return {
+        id: configRecord.id,
+        orgId: configRecord.orgId,
+        syncInterval: configRecord.syncInterval,
+        autoSyncEnabled: configRecord.autoSyncEnabled,
+        lastSyncedAt: configRecord.lastSyncedAt,
+        createdAt: configRecord.createdAt,
+        updatedAt: configRecord.updatedAt,
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to save GoogleCampaignConfig: ${error.message}`,
+      );
+      throw new InternalServerErrorException(
+        'Failed to save Google campaign configuration',
+      );
+    }
+  }
+
+  /**
+   * Fetches the GoogleCampaignConfig for a specific organization
+   */
+  async getGoogleCampaignConfigByOrgId(orgId: string) {
+    this.logger.log(`Fetching GoogleCampaignConfig for org: ${orgId}`);
+
+    // Validate organization
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+    });
+    if (!org) {
+      this.logger.error(`Organization not found for id: ${orgId}`);
+      throw new NotFoundException('Organization not found');
+    }
+
+    // Fetch GoogleCampaignConfig with related googleAccounts
+    try {
+      const configRecord = await this.prisma.googleCampaignConfig.findUnique({
+        where: { orgId },
+        include: {
+          googleAccounts: {
+            select: { id: true },
+          },
+        },
+      });
+
+      if (!configRecord) {
+        this.logger.error(`GoogleCampaignConfig not found for org: ${orgId}`);
+        throw new NotFoundException('Google campaign configuration not found');
+      }
+
+      this.logger.log(
+        `Successfully fetched GoogleCampaignConfig for org: ${orgId}`,
+      );
+
+      return {
+        id: configRecord.id,
+        orgId: configRecord.orgId,
+        syncInterval: configRecord.syncInterval,
+        autoSyncEnabled: configRecord.autoSyncEnabled,
+        googleAccounts: configRecord.googleAccounts.map(
+          (account) => account.id,
+        ),
+        lastSyncedAt: configRecord.lastSyncedAt,
+        createdAt: configRecord.createdAt,
+        updatedAt: configRecord.updatedAt,
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to fetch GoogleCampaignConfig: ${error.message}`,
+      );
+      throw new InternalServerErrorException(
+        'Failed to fetch Google campaign configuration',
+      );
+    }
+  }
   /**
    * Starts dynamic sync for the single organization
    */
   private async startDynamicSync() {
     this.logger.log('Starting dynamic sync for single-org');
+    const orgId = 'single-org';
+
     try {
       const config = await this.prisma.googleCampaignConfig.findUnique({
-        where: { orgId: 'single-org' },
+        where: { orgId },
         select: {
           orgId: true,
           autoSyncEnabled: true,
@@ -311,12 +485,27 @@ export class GoogleCampaignsService {
         },
       });
 
-      if (!config) {
-        this.logger.warn('GoogleCampaignConfig for single-org not found');
+      const existingJob = this.jobs.get(orgId);
+
+      if (!config || !config.autoSyncEnabled) {
+        if (existingJob) {
+          existingJob.cancel();
+          this.jobs.delete(orgId);
+          this.logger.log(
+            `Cancelled sync job for org ${orgId} as config is missing or auto-sync is disabled`,
+          );
+        }
+        if (!config) {
+          this.logger.warn('GoogleCampaignConfig for single-org not found');
+        } else {
+          this.logger.log(
+            `Auto-sync disabled for org ${orgId}, no sync scheduled`,
+          );
+        }
         return;
       }
 
-      this.logger.log('Found GoogleCampaignConfig for single-org to sync');
+      // Schedule a new job only if auto-sync is enabled and no job exists
       if (config.autoSyncEnabled && !this.jobs.has(config.orgId)) {
         await this.scheduleOrgSync(config.orgId, config.syncInterval);
       }
@@ -370,6 +559,16 @@ export class GoogleCampaignsService {
       try {
         await this.limiter.schedule(() =>
           this.syncCampaignsAdGroupsAndAds(orgId),
+        );
+        await this.notificationService.notifyUsersOfOrg(
+          orgId,
+          'receiveSyncSuccess',
+          {
+            title: 'Google Sync Successful',
+            message: `Google campaigns were successfully synced for your organization.`,
+            type: 'success',
+            meta: { orgId },
+          },
         );
         this.logger.log(`Sync completed for org ${orgId}`);
       } catch (error: any) {
@@ -1271,7 +1470,6 @@ export class GoogleCampaignsService {
     };
   }
 
-  
   async createCampaignWithBudget(
     formData: GoogleAdsFormData,
     orgId: string,
@@ -1358,7 +1556,7 @@ export class GoogleCampaignsService {
               formData.newBudget?.deliveryMethod || 'STANDARD'
             ],
           amount_micros: toMicros(Number(formData.newBudget?.amount ?? '1')),
-          explicitly_shared: formData.newBudget?.explicitly_shared || false
+          explicitly_shared: formData.newBudget?.explicitly_shared || false,
         },
       };
 
@@ -1405,7 +1603,6 @@ export class GoogleCampaignsService {
     );
 
     const campaign: resources.ICampaign = {
-      
       name: formData.name,
       advertising_channel_type:
         formData.advertisingChannelType as GoogleAdvertisingChannelType,
@@ -1422,9 +1619,9 @@ export class GoogleCampaignsService {
           formData.networkSettings.targetGoogleTvNetwork,
       },
       geo_target_type_setting: {
-      positive_geo_target_type: 'PRESENCE_OR_INTEREST',
-      negative_geo_target_type: 'PRESENCE',
-    },
+        positive_geo_target_type: 'PRESENCE_OR_INTEREST',
+        negative_geo_target_type: 'PRESENCE',
+      },
       start_date: formData.runSchedule.start
         ? this.formatDate(formData.runSchedule.start)
         : undefined,
@@ -1433,73 +1630,108 @@ export class GoogleCampaignsService {
         : undefined,
     };
 
-    campaign.bidding_strategy_type = formData.biddingStrategyType as any | undefined;
-  let biddingStrategyResourceName: string | undefined;
-  if (['TARGET_CPA', 'TARGET_ROAS'].includes(formData.biddingStrategyType as any)) {
-    const biddingStrategyEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/biddingStrategies:mutate`;
-    const biddingStrategyOperation = {
-      create: {
-        name: `${formData.biddingStrategyType} Strategy for ${formData.name}`,
-        bidding_strategy_type: formData.biddingStrategyType,
-        ...(formData.biddingStrategyType === 'TARGET_CPA'
-          ? { target_cpa: { target_cpa_micros: toMicros(Number(formData.targetCpa || '1')) } }
-          : { target_roas: { target_roas: Number(formData.targetRoas || '1') } }),
-      },
-    };
-
-    try {
-      const response = await axios.post<any>(biddingStrategyEndpoint, { operations: [biddingStrategyOperation] }, { headers });
-      this.logger.log(`Bidding strategy creation response: ${JSON.stringify(response.data)}`);
-      if (response.status !== 200) {
-        throw new Error(`Bidding strategy creation failed with status ${response.status}`);
-      }
-      biddingStrategyResourceName = response.data.results[0].resourceName;
-      this.logger.log(`Created bidding strategy: ${biddingStrategyResourceName}`);
-    } catch (error: any) {
-      this.logger.error(`Bidding strategy creation failed: ${error.message}`, {
-        stack: error.stack,
-        details: JSON.stringify(error.response?.data || {}),
-        request_id: error.response?.data?.requestId || 'N/A',
-      });
-      throw new InternalServerErrorException('Failed to create bidding strategy');
-    }
-  }
-
-  switch (formData.biddingStrategyType) {
-    case 'MANUAL_CPC':
-      campaign.manual_cpc = { enhanced_cpc_enabled: true };
-      break;
-    case 'MANUAL_CPM':
-      campaign.manual_cpm = {};
-      break;
-    case 'MANUAL_CPV':
-      campaign.manual_cpv = {};
-      break;
-    case 'MAXIMIZE_CONVERSIONS':
-      campaign.maximize_conversions = {};
-      break;
-    case 'MAXIMIZE_CONVERSION_VALUE':
-      campaign.maximize_conversion_value = {};
-      break;
-    case 'TARGET_CPA':
-      campaign.bidding_strategy = biddingStrategyResourceName;
-      break;
-    case 'TARGET_ROAS':
-      campaign.bidding_strategy = biddingStrategyResourceName;
-      break;
-    case 'TARGET_CPM':
-      campaign.target_cpm = {};
-      break;
-    case 'TARGET_IMPRESSION_SHARE':
-      campaign.target_impression_share = {
-        location: 'ANYWHERE_ON_PAGE',
+    campaign.bidding_strategy_type = formData.biddingStrategyType as
+      | any
+      | undefined;
+    let biddingStrategyResourceName: string | undefined;
+    if (
+      ['TARGET_CPA', 'TARGET_ROAS'].includes(
+        formData.biddingStrategyType as any,
+      )
+    ) {
+      const biddingStrategyEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/biddingStrategies:mutate`;
+      const biddingStrategyOperation = {
+        create: {
+          name: `${formData.biddingStrategyType} Strategy for ${formData.name}`,
+          bidding_strategy_type: formData.biddingStrategyType,
+          ...(formData.biddingStrategyType === 'TARGET_CPA'
+            ? {
+                target_cpa: {
+                  target_cpa_micros: toMicros(
+                    Number(formData.targetCpa || '1'),
+                  ),
+                },
+              }
+            : {
+                target_roas: {
+                  target_roas: Number(formData.targetRoas || '1'),
+                },
+              }),
+        },
       };
-      break;
-    default:
-      this.logger.error(`Unsupported bidding strategy: ${formData.biddingStrategyType}`);
-      throw new InternalServerErrorException(`Unsupported bidding strategy: ${formData.biddingStrategyType}`);
-  }
-  this.logger.log(`Set bidding strategy: ${formData.biddingStrategyType}`);
+
+      try {
+        const response = await axios.post<any>(
+          biddingStrategyEndpoint,
+          { operations: [biddingStrategyOperation] },
+          { headers },
+        );
+        this.logger.log(
+          `Bidding strategy creation response: ${JSON.stringify(response.data)}`,
+        );
+        if (response.status !== 200) {
+          throw new Error(
+            `Bidding strategy creation failed with status ${response.status}`,
+          );
+        }
+        biddingStrategyResourceName = response.data.results[0].resourceName;
+        this.logger.log(
+          `Created bidding strategy: ${biddingStrategyResourceName}`,
+        );
+      } catch (error: any) {
+        this.logger.error(
+          `Bidding strategy creation failed: ${error.message}`,
+          {
+            stack: error.stack,
+            details: JSON.stringify(error.response?.data || {}),
+            request_id: error.response?.data?.requestId || 'N/A',
+          },
+        );
+        throw new InternalServerErrorException(
+          'Failed to create bidding strategy',
+        );
+      }
+    }
+
+    switch (formData.biddingStrategyType) {
+      case 'MANUAL_CPC':
+        campaign.manual_cpc = { enhanced_cpc_enabled: true };
+        break;
+      case 'MANUAL_CPM':
+        campaign.manual_cpm = {};
+        break;
+      case 'MANUAL_CPV':
+        campaign.manual_cpv = {};
+        break;
+      case 'MAXIMIZE_CONVERSIONS':
+        campaign.maximize_conversions = {};
+        break;
+      case 'MAXIMIZE_CONVERSION_VALUE':
+        campaign.maximize_conversion_value = {};
+        break;
+      case 'TARGET_CPA':
+        campaign.bidding_strategy = biddingStrategyResourceName;
+        break;
+      case 'TARGET_ROAS':
+        campaign.bidding_strategy = biddingStrategyResourceName;
+        break;
+      case 'TARGET_CPM':
+        campaign.target_cpm = {};
+        break;
+      case 'TARGET_IMPRESSION_SHARE':
+        campaign.target_impression_share = {
+          location: 'ANYWHERE_ON_PAGE',
+        };
+        break;
+      default:
+        this.logger.error(
+          `Unsupported bidding strategy: ${formData.biddingStrategyType}`,
+        );
+        throw new InternalServerErrorException(
+          `Unsupported bidding strategy: ${formData.biddingStrategyType}`,
+        );
+    }
+    this.logger.log(`Set bidding strategy: ${formData.biddingStrategyType}`);
 
     const campaignEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/campaigns:mutate`;
     const campaignOperation = { create: campaign };
@@ -1663,7 +1895,7 @@ export class GoogleCampaignsService {
             ? null
             : toMicros(Number(formData.newBudget?.amount ?? '1')),
         delivery_method: formData.newBudget?.deliveryMethod ?? 'STANDARD',
-        explicitly_shared: formData.newBudget?.explicitly_shared ?? false
+        explicitly_shared: formData.newBudget?.explicitly_shared ?? false,
       },
       network_settings: {
         targetGoogleSearch: formData.networkSettings.targetGoogleSearch,
@@ -1740,589 +1972,693 @@ export class GoogleCampaignsService {
     return new Date(ms).toISOString().slice(0, 10).replace(/-/g, '');
   }
 
-async updateCampaign(
-  campaignId: string,
-  customerAccountId: string,
-  formData: Partial<GoogleAdsFormData>,
-  orgId: string,
-): Promise<string> {
-  this.logger.log(`Updating campaign ${campaignId} for customer: ${customerAccountId}`);
-  this.logger.debug(`Update data: ${JSON.stringify(formData, null, 2)}`);
-
-  // Get credentials and platform details
-  const creds = await this.googleService.getGoogleCredentials();
-  const platform = await this.prisma.marketingPlatform.findFirst({
-    where: { orgId, platform_name: 'Google' },
-  });
-  if (!platform) {
-    this.logger.error('Google marketing platform not found');
-    throw new InternalServerErrorException('Google marketing platform not found');
-  }
-
-  const platformCreds = await this.prisma.platformCredentials.findFirst({
-    where: { type: 'AUTH', user_id: null, platform_id: platform.platform_id },
-  });
-  if (!platformCreds || !platformCreds.refresh_token) {
-    this.logger.error('No valid Google platform credentials found');
-    throw new ForbiddenException('No valid Google platform credentials found');
-  }
-
-  const googleAccount = await this.prisma.googleAccount.findFirst({
-    where: { orgId },
-  });
-  if (!googleAccount || !googleAccount.mccId) {
-    this.logger.error('Google account or MCC ID not found');
-    throw new InternalServerErrorException('Google account or MCC ID not found');
-  }
-
-  // Get valid access token
-  const accessToken = await this.googleService.getValidAccessToken(
-    creds.clientId,
-    creds.clientSecret,
-    platformCreds.refresh_token,
-    platform.platform_id,
-  );
-
-  const headers = {
-    Authorization: `Bearer ${accessToken}`,
-    'developer-token': creds.developerToken,
-    'login-customer-id': googleAccount.mccId,
-    'Content-Type': 'application/json',
-  };
-
-  const campaignResourceName = ResourceNames.campaign(customerAccountId, campaignId);
-
-  // Fetch existing campaign data from database for merging
-  const existingCampaign = await this.prisma.googleCampaign.findUnique({
-    where: { campaign_id: campaignId },
-  });
-  if (!existingCampaign) {
-    this.logger.error(`Campaign with ID ${campaignId} not found in database`);
-    throw new Error(`Campaign with ID ${campaignId} not found`);
-  }
-
-  // Define interface for campaign_budget to fix type errors
-  interface CampaignBudget {
-    resourceName: string;
-    amount_micros?: number;
-    delivery_method?: string;
-    explicitly_shared?: boolean;
-  }
-
-  // Safely access campaign_budget
-  const campaignBudget = existingCampaign.campaign_budget as CampaignBudget | null;
-  let budgetResourceName = campaignBudget?.resourceName;
-
-  // ----------------------------
-  // STEP 1: Handle Budget
-  // ----------------------------
-  if (formData.budgetOption) {
-    if (formData.budgetOption === 'SELECT_EXISTING' && formData.existingBudgetId) {
-      budgetResourceName = ResourceNames.campaignBudget(customerAccountId, formData.existingBudgetId);
-      this.logger.log(`Using existing budget: ${budgetResourceName}`);
-    } else if (formData.budgetOption === 'CREATE_NEW' && formData.newBudget) {
-      const budgetEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/campaignBudgets:mutate`;
-      const budgetOperation = {
-        create: {
-          name: formData.newBudget.name || `Budget-${Date.now()}`,
-          delivery_method: enums.BudgetDeliveryMethod[formData.newBudget.deliveryMethod || 'STANDARD'],
-          amount_micros: toMicros(Number(formData.newBudget.amount)),
-          explicitly_shared: formData.newBudget.explicitly_shared || false,
-        },
-      };
-
-      this.logger.log(`Creating new budget with operation: ${JSON.stringify(budgetOperation)}`);
-
-      try {
-        const response = await axios.post<any>(
-          budgetEndpoint,
-          { operations: [budgetOperation] },
-          { headers },
-        );
-        if (response.status !== 200) {
-          throw new Error(`Budget creation failed with status ${response.status}`);
-        }
-        budgetResourceName = response.data.results[0].resourceName;
-        this.logger.log(`Created new budget: ${budgetResourceName}`);
-      } catch (error: any) {
-        this.logger.error(`Budget creation failed: ${error.message}`, {
-          stack: error.stack,
-          details: JSON.stringify(error.response?.data || {}),
-        });
-        throw new InternalServerErrorException('Failed to create campaign budget');
-      }
-    }
-  }
-
-  // ----------------------------
-  // STEP 2: Handle Bidding Strategy
-  // ----------------------------
-  // Fix: Use bidding_strategy_type instead of bidding_strategy
-  let biddingStrategyResourceName: string | undefined = undefined; // Assume no bidding strategy unless created
-  if (formData.biddingStrategyType) {
-    if (['TARGET_CPA', 'TARGET_ROAS'].includes(formData.biddingStrategyType)) {
-      const biddingStrategyEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/biddingStrategies:mutate`;
-      const biddingStrategyOperation = {
-        create: {
-          name: `${formData.biddingStrategyType} Strategy for ${formData.name || existingCampaign.campaign_name}`,
-          bidding_strategy_type: formData.biddingStrategyType,
-          ...(formData.biddingStrategyType === 'TARGET_CPA' && formData.targetCpa
-            ? { target_cpa: { target_cpa_micros: toMicros(Number(formData.targetCpa)) } }
-            : formData.biddingStrategyType === 'TARGET_ROAS' && formData.targetRoas
-            ? { target_roas: { target_roas: Number(formData.targetRoas) } }
-            : {}),
-        },
-      };
-
-      try {
-        const response = await axios.post<any>(
-          biddingStrategyEndpoint,
-          { operations: [biddingStrategyOperation] },
-          { headers },
-        );
-        if (response.status !== 200) {
-          throw new Error(`Bidding strategy creation failed with status ${response.status}`);
-        }
-        biddingStrategyResourceName = response.data.results[0].resourceName;
-        this.logger.log(`Created/Updated bidding strategy: ${biddingStrategyResourceName}`);
-      } catch (error: any) {
-        this.logger.error(`Bidding strategy creation failed: ${error.message}`, {
-          stack: error.stack,
-          details: JSON.stringify(error.response?.data || {}),
-        });
-        throw new InternalServerErrorException('Failed to create bidding strategy');
-      }
-    }
-  }
-
-  // ----------------------------
-  // STEP 3: Build Campaign Update Operation
-  // ----------------------------
-  const campaign: Partial<resources.ICampaign> = {
-    resource_name: campaignResourceName,
-    ...(formData.name && { name: formData.name }),
-    ...(formData.status && { status: formData.status as GoogleCampaignStatus }),
-    ...(formData.advertisingChannelType && {
-      advertising_channel_type: formData.advertisingChannelType as GoogleAdvertisingChannelType,
-    }),
-    ...(budgetResourceName && { campaign_budget: budgetResourceName }),
-    ...(formData.networkSettings && {
-      network_settings: {
-        target_google_search: formData.networkSettings.targetGoogleSearch,
-        target_search_network: formData.networkSettings.targetSearchNetwork,
-        target_content_network: formData.networkSettings.targetContentNetwork,
-        target_partner_search_network: formData.networkSettings.targetPartnerSearchNetwork,
-        target_youtube: formData.networkSettings.targetYoutube,
-        target_google_tv_network: formData.networkSettings.targetGoogleTvNetwork,
-      },
-    }),
-    ...(formData.runSchedule?.start && {
-      start_date: this.formatDate(formData.runSchedule.start),
-    }),
-    ...(formData.runSchedule?.end && {
-      end_date: this.formatDate(formData.runSchedule.end),
-    }),
-  };
-
-  if (formData.biddingStrategyType) {
-    campaign.bidding_strategy_type = formData.biddingStrategyType as any;
-    switch (formData.biddingStrategyType) {
-      case 'MANUAL_CPC':
-        campaign.manual_cpc = { enhanced_cpc_enabled: true };
-        break;
-      case 'MANUAL_CPM':
-        campaign.manual_cpm = {};
-        break;
-      case 'MANUAL_CPV':
-        campaign.manual_cpv = {};
-        break;
-      case 'MAXIMIZE_CONVERSIONS':
-        campaign.maximize_conversions = {};
-        break;
-      case 'MAXIMIZE_CONVERSION_VALUE':
-        campaign.maximize_conversion_value = {};
-        break;
-      case 'TARGET_CPA':
-        campaign.bidding_strategy = biddingStrategyResourceName;
-        break;
-      case 'TARGET_ROAS':
-        campaign.bidding_strategy = biddingStrategyResourceName;
-        break;
-      case 'TARGET_CPM':
-        campaign.target_cpm = {};
-        break;
-      case 'TARGET_IMPRESSION_SHARE':
-        campaign.target_impression_share = { location: 'ANYWHERE_ON_PAGE' };
-        break;
-      default:
-        this.logger.error(`Unsupported bidding strategy: ${formData.biddingStrategyType}`);
-        throw new InternalServerErrorException(`Unsupported bidding strategy: ${formData.biddingStrategyType}`);
-    }
-  }
-
-  const campaignEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/campaigns:mutate`;
-  const campaignOperation = {
-    update: campaign,
-    update_mask: Object.keys(campaign)
-      .filter((key) => key !== 'resource_name')
-      .join(','),
-  };
-
-  this.logger.log(`Updating campaign with operation: ${JSON.stringify(campaignOperation)}`);
-
-  try {
-    const response = await axios.post<any>(
-      campaignEndpoint,
-      { operations: [campaignOperation] },
-      { headers },
+  async updateCampaign(
+    campaignId: string,
+    customerAccountId: string,
+    formData: Partial<GoogleAdsFormData>,
+    orgId: string,
+  ): Promise<string> {
+    this.logger.log(
+      `Updating campaign ${campaignId} for customer: ${customerAccountId}`,
     );
-    if (response.status !== 200) {
-      throw new Error(`Campaign update failed with status ${response.status}`);
-    }
-    this.logger.log(`Updated campaign: ${campaignResourceName}`);
-  } catch (error: any) {
-    this.logger.error(`Campaign update failed: ${error.message}`, {
-      stack: error.stack,
-      details: JSON.stringify(error.response?.data || {}),
+    this.logger.debug(`Update data: ${JSON.stringify(formData, null, 2)}`);
+
+    // Get credentials and platform details
+    const creds = await this.googleService.getGoogleCredentials();
+    const platform = await this.prisma.marketingPlatform.findFirst({
+      where: { orgId, platform_name: 'Google' },
     });
-    throw new InternalServerErrorException('Failed to update campaign');
-  }
+    if (!platform) {
+      this.logger.error('Google marketing platform not found');
+      throw new InternalServerErrorException(
+        'Google marketing platform not found',
+      );
+    }
 
-  // ----------------------------
-  // STEP 4: Update Targeting Criteria (Geo and Language)
-  // ----------------------------
-  if (formData.geoTargets || formData.languages) {
-  const criteriaEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/campaignCriteria:mutate`;
-  const criteriaOperations: { create: any }[] = [];
+    const platformCreds = await this.prisma.platformCredentials.findFirst({
+      where: { type: 'AUTH', user_id: null, platform_id: platform.platform_id },
+    });
+    if (!platformCreds || !platformCreds.refresh_token) {
+      this.logger.error('No valid Google platform credentials found');
+      throw new ForbiddenException(
+        'No valid Google platform credentials found',
+      );
+    }
 
-  // Initialize client for querying criteria
-  const client = new GoogleAdsApi({
-    client_id: creds.clientId,
-    client_secret: creds.clientSecret,
-    developer_token: creds.developerToken,
-  }).Customer({
-    customer_id: customerAccountId,
-    refresh_token: platformCreds.refresh_token,
-    login_customer_id: googleAccount.mccId,
-  });
+    const googleAccount = await this.prisma.googleAccount.findFirst({
+      where: { orgId },
+    });
+    if (!googleAccount || !googleAccount.mccId) {
+      this.logger.error('Google account or MCC ID not found');
+      throw new InternalServerErrorException(
+        'Google account or MCC ID not found',
+      );
+    }
 
-  // Step 4.1: Remove existing criteria only for updated types
-  const criteriaTypes: string[] = []; // Explicitly type as string[]
-  if (formData.geoTargets) criteriaTypes.push('LOCATION');
-  if (formData.languages) criteriaTypes.push('LANGUAGE');
+    // Get valid access token
+    const accessToken = await this.googleService.getValidAccessToken(
+      creds.clientId,
+      creds.clientSecret,
+      platformCreds.refresh_token,
+      platform.platform_id,
+    );
 
-  if (criteriaTypes.length > 0) {
-    const existingCriteria = await client.query(`
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      'developer-token': creds.developerToken,
+      'login-customer-id': googleAccount.mccId,
+      'Content-Type': 'application/json',
+    };
+
+    const campaignResourceName = ResourceNames.campaign(
+      customerAccountId,
+      campaignId,
+    );
+
+    // Fetch existing campaign data from database for merging
+    const existingCampaign = await this.prisma.googleCampaign.findUnique({
+      where: { campaign_id: campaignId },
+    });
+    if (!existingCampaign) {
+      this.logger.error(`Campaign with ID ${campaignId} not found in database`);
+      throw new Error(`Campaign with ID ${campaignId} not found`);
+    }
+
+    // Define interface for campaign_budget to fix type errors
+    interface CampaignBudget {
+      resourceName: string;
+      amount_micros?: number;
+      delivery_method?: string;
+      explicitly_shared?: boolean;
+    }
+
+    // Safely access campaign_budget
+    const campaignBudget =
+      existingCampaign.campaign_budget as CampaignBudget | null;
+    let budgetResourceName = campaignBudget?.resourceName;
+
+    // ----------------------------
+    // STEP 1: Handle Budget
+    // ----------------------------
+    if (formData.budgetOption) {
+      if (
+        formData.budgetOption === 'SELECT_EXISTING' &&
+        formData.existingBudgetId
+      ) {
+        budgetResourceName = ResourceNames.campaignBudget(
+          customerAccountId,
+          formData.existingBudgetId,
+        );
+        this.logger.log(`Using existing budget: ${budgetResourceName}`);
+      } else if (formData.budgetOption === 'CREATE_NEW' && formData.newBudget) {
+        const budgetEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/campaignBudgets:mutate`;
+        const budgetOperation = {
+          create: {
+            name: formData.newBudget.name || `Budget-${Date.now()}`,
+            delivery_method:
+              enums.BudgetDeliveryMethod[
+                formData.newBudget.deliveryMethod || 'STANDARD'
+              ],
+            amount_micros: toMicros(Number(formData.newBudget.amount)),
+            explicitly_shared: formData.newBudget.explicitly_shared || false,
+          },
+        };
+
+        this.logger.log(
+          `Creating new budget with operation: ${JSON.stringify(budgetOperation)}`,
+        );
+
+        try {
+          const response = await axios.post<any>(
+            budgetEndpoint,
+            { operations: [budgetOperation] },
+            { headers },
+          );
+          if (response.status !== 200) {
+            throw new Error(
+              `Budget creation failed with status ${response.status}`,
+            );
+          }
+          budgetResourceName = response.data.results[0].resourceName;
+          this.logger.log(`Created new budget: ${budgetResourceName}`);
+        } catch (error: any) {
+          this.logger.error(`Budget creation failed: ${error.message}`, {
+            stack: error.stack,
+            details: JSON.stringify(error.response?.data || {}),
+          });
+          throw new InternalServerErrorException(
+            'Failed to create campaign budget',
+          );
+        }
+      }
+    }
+
+    // ----------------------------
+    // STEP 2: Handle Bidding Strategy
+    // ----------------------------
+    // Fix: Use bidding_strategy_type instead of bidding_strategy
+    let biddingStrategyResourceName: string | undefined = undefined; // Assume no bidding strategy unless created
+    if (formData.biddingStrategyType) {
+      if (
+        ['TARGET_CPA', 'TARGET_ROAS'].includes(formData.biddingStrategyType)
+      ) {
+        const biddingStrategyEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/biddingStrategies:mutate`;
+        const biddingStrategyOperation = {
+          create: {
+            name: `${formData.biddingStrategyType} Strategy for ${formData.name || existingCampaign.campaign_name}`,
+            bidding_strategy_type: formData.biddingStrategyType,
+            ...(formData.biddingStrategyType === 'TARGET_CPA' &&
+            formData.targetCpa
+              ? {
+                  target_cpa: {
+                    target_cpa_micros: toMicros(Number(formData.targetCpa)),
+                  },
+                }
+              : formData.biddingStrategyType === 'TARGET_ROAS' &&
+                  formData.targetRoas
+                ? { target_roas: { target_roas: Number(formData.targetRoas) } }
+                : {}),
+          },
+        };
+
+        try {
+          const response = await axios.post<any>(
+            biddingStrategyEndpoint,
+            { operations: [biddingStrategyOperation] },
+            { headers },
+          );
+          if (response.status !== 200) {
+            throw new Error(
+              `Bidding strategy creation failed with status ${response.status}`,
+            );
+          }
+          biddingStrategyResourceName = response.data.results[0].resourceName;
+          this.logger.log(
+            `Created/Updated bidding strategy: ${biddingStrategyResourceName}`,
+          );
+        } catch (error: any) {
+          this.logger.error(
+            `Bidding strategy creation failed: ${error.message}`,
+            {
+              stack: error.stack,
+              details: JSON.stringify(error.response?.data || {}),
+            },
+          );
+          throw new InternalServerErrorException(
+            'Failed to create bidding strategy',
+          );
+        }
+      }
+    }
+
+    // ----------------------------
+    // STEP 3: Build Campaign Update Operation
+    // ----------------------------
+    const campaign: Partial<resources.ICampaign> = {
+      resource_name: campaignResourceName,
+      ...(formData.name && { name: formData.name }),
+      ...(formData.status && {
+        status: formData.status as GoogleCampaignStatus,
+      }),
+      ...(formData.advertisingChannelType && {
+        advertising_channel_type:
+          formData.advertisingChannelType as GoogleAdvertisingChannelType,
+      }),
+      ...(budgetResourceName && { campaign_budget: budgetResourceName }),
+      ...(formData.networkSettings && {
+        network_settings: {
+          target_google_search: formData.networkSettings.targetGoogleSearch,
+          target_search_network: formData.networkSettings.targetSearchNetwork,
+          target_content_network: formData.networkSettings.targetContentNetwork,
+          target_partner_search_network:
+            formData.networkSettings.targetPartnerSearchNetwork,
+          target_youtube: formData.networkSettings.targetYoutube,
+          target_google_tv_network:
+            formData.networkSettings.targetGoogleTvNetwork,
+        },
+      }),
+      ...(formData.runSchedule?.start && {
+        start_date: this.formatDate(formData.runSchedule.start),
+      }),
+      ...(formData.runSchedule?.end && {
+        end_date: this.formatDate(formData.runSchedule.end),
+      }),
+    };
+
+    if (formData.biddingStrategyType) {
+      campaign.bidding_strategy_type = formData.biddingStrategyType as any;
+      switch (formData.biddingStrategyType) {
+        case 'MANUAL_CPC':
+          campaign.manual_cpc = { enhanced_cpc_enabled: true };
+          break;
+        case 'MANUAL_CPM':
+          campaign.manual_cpm = {};
+          break;
+        case 'MANUAL_CPV':
+          campaign.manual_cpv = {};
+          break;
+        case 'MAXIMIZE_CONVERSIONS':
+          campaign.maximize_conversions = {};
+          break;
+        case 'MAXIMIZE_CONVERSION_VALUE':
+          campaign.maximize_conversion_value = {};
+          break;
+        case 'TARGET_CPA':
+          campaign.bidding_strategy = biddingStrategyResourceName;
+          break;
+        case 'TARGET_ROAS':
+          campaign.bidding_strategy = biddingStrategyResourceName;
+          break;
+        case 'TARGET_CPM':
+          campaign.target_cpm = {};
+          break;
+        case 'TARGET_IMPRESSION_SHARE':
+          campaign.target_impression_share = { location: 'ANYWHERE_ON_PAGE' };
+          break;
+        default:
+          this.logger.error(
+            `Unsupported bidding strategy: ${formData.biddingStrategyType}`,
+          );
+          throw new InternalServerErrorException(
+            `Unsupported bidding strategy: ${formData.biddingStrategyType}`,
+          );
+      }
+    }
+
+    const campaignEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/campaigns:mutate`;
+    const campaignOperation = {
+      update: campaign,
+      update_mask: Object.keys(campaign)
+        .filter((key) => key !== 'resource_name')
+        .join(','),
+    };
+
+    this.logger.log(
+      `Updating campaign with operation: ${JSON.stringify(campaignOperation)}`,
+    );
+
+    try {
+      const response = await axios.post<any>(
+        campaignEndpoint,
+        { operations: [campaignOperation] },
+        { headers },
+      );
+      if (response.status !== 200) {
+        throw new Error(
+          `Campaign update failed with status ${response.status}`,
+        );
+      }
+      this.logger.log(`Updated campaign: ${campaignResourceName}`);
+    } catch (error: any) {
+      this.logger.error(`Campaign update failed: ${error.message}`, {
+        stack: error.stack,
+        details: JSON.stringify(error.response?.data || {}),
+      });
+      throw new InternalServerErrorException('Failed to update campaign');
+    }
+
+    // ----------------------------
+    // STEP 4: Update Targeting Criteria (Geo and Language)
+    // ----------------------------
+    if (formData.geoTargets || formData.languages) {
+      const criteriaEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/campaignCriteria:mutate`;
+      const criteriaOperations: { create: any }[] = [];
+
+      // Initialize client for querying criteria
+      const client = new GoogleAdsApi({
+        client_id: creds.clientId,
+        client_secret: creds.clientSecret,
+        developer_token: creds.developerToken,
+      }).Customer({
+        customer_id: customerAccountId,
+        refresh_token: platformCreds.refresh_token,
+        login_customer_id: googleAccount.mccId,
+      });
+
+      // Step 4.1: Remove existing criteria only for updated types
+      const criteriaTypes: string[] = []; // Explicitly type as string[]
+      if (formData.geoTargets) criteriaTypes.push('LOCATION');
+      if (formData.languages) criteriaTypes.push('LANGUAGE');
+
+      if (criteriaTypes.length > 0) {
+        const existingCriteria = await client.query(`
       SELECT campaign_criterion.resource_name
       FROM campaign_criterion
       WHERE campaign_criterion.campaign = '${campaignResourceName}'
         AND campaign_criterion.type IN (${criteriaTypes.map((t) => `'${t}'`).join(',')})
     `);
 
-    const removeOperations: { remove: string }[] = [];
-    for await (const row of existingCriteria) {
-      if (row.campaign_criterion?.resource_name) {
-        removeOperations.push({
-          remove: row.campaign_criterion.resource_name,
-        });
-      }
-    }
-
-    if (removeOperations.length > 0) {
-      try {
-        const response = await axios.post(
-          criteriaEndpoint,
-          { operations: removeOperations },
-          { headers },
-        );
-        if (response.status !== 200) {
-          throw new Error(`Criteria removal failed with status ${response.status}`);
+        const removeOperations: { remove: string }[] = [];
+        for await (const row of existingCriteria) {
+          if (row.campaign_criterion?.resource_name) {
+            removeOperations.push({
+              remove: row.campaign_criterion.resource_name,
+            });
+          }
         }
-        this.logger.log(`Removed ${removeOperations.length} existing criteria`);
-      } catch (error: any) {
-        this.logger.error(`Criteria removal failed: ${error.message}`, {
-          stack: error.stack,
-          details: JSON.stringify(error.response?.data || {}),
+
+        if (removeOperations.length > 0) {
+          try {
+            const response = await axios.post(
+              criteriaEndpoint,
+              { operations: removeOperations },
+              { headers },
+            );
+            if (response.status !== 200) {
+              throw new Error(
+                `Criteria removal failed with status ${response.status}`,
+              );
+            }
+            this.logger.log(
+              `Removed ${removeOperations.length} existing criteria`,
+            );
+          } catch (error: any) {
+            this.logger.error(`Criteria removal failed: ${error.message}`, {
+              stack: error.stack,
+              details: JSON.stringify(error.response?.data || {}),
+            });
+            throw new InternalServerErrorException(
+              'Failed to remove existing campaign criteria',
+            );
+          }
+        }
+      }
+
+      // Step 4.2: Add new geo target criteria
+      if (formData.geoTargets) {
+        formData.geoTargets.include?.forEach((target) => {
+          criteriaOperations.push({
+            create: {
+              campaign: campaignResourceName,
+              type: enums.CriterionType.LOCATION,
+              location: {
+                geo_target_constant: `geoTargetConstants/${target.value}`,
+              },
+            },
+          });
         });
-        throw new InternalServerErrorException('Failed to remove existing campaign criteria');
+
+        formData.geoTargets.exclude?.forEach((target) => {
+          criteriaOperations.push({
+            create: {
+              campaign: campaignResourceName,
+              type: enums.CriterionType.LOCATION,
+              location: {
+                geo_target_constant: `geoTargetConstants/${target.value}`,
+              },
+              negative: true,
+            },
+          });
+        });
+      }
+
+      // Step 4.3: Add new language criteria
+      if (formData.languages) {
+        formData.languages.include?.forEach((target) => {
+          criteriaOperations.push({
+            create: {
+              campaign: campaignResourceName,
+              type: enums.CriterionType.LANGUAGE,
+              language: {
+                language_constant: `languageConstants/${target.value}`,
+              },
+            },
+          });
+        });
+        // Note: Excluded languages are not supported in Google Ads API, so we ignore languages.exclude
+      }
+
+      // Step 4.4: Apply new criteria
+      if (criteriaOperations.length > 0) {
+        try {
+          const response = await axios.post(
+            criteriaEndpoint,
+            { operations: criteriaOperations },
+            { headers },
+          );
+          if (response.status !== 200) {
+            throw new Error(
+              `Criteria creation failed with status ${response.status}`,
+            );
+          }
+          this.logger.log(
+            `Created ${criteriaOperations.length} new campaign criteria`,
+          );
+        } catch (error: any) {
+          this.logger.error(`Criteria creation failed: ${error.message}`, {
+            stack: error.stack,
+            details: JSON.stringify(error.response?.data || {}),
+          });
+          throw new InternalServerErrorException(
+            'Failed to create new campaign criteria',
+          );
+        }
       }
     }
+
+    // Define interfaces for geo_targets and languages
+    interface GeoTargets {
+      include: { value: string; text: string }[];
+      exclude: { value: string; text: string }[];
+    }
+
+    interface Languages {
+      include: { value: string; text: string }[];
+      exclude: { value: string; text: string }[];
+    }
+
+    // Safely access geo_targets and languages
+    const geoTargets = existingCampaign.geo_targets as GeoTargets | null;
+    const languages = existingCampaign.languages as Languages | null;
+    // ----------------------------
+    // STEP 5: Save Updated Campaign to Database
+    // ----------------------------
+    const campaignData: Prisma.GoogleCampaignUpdateInput = {
+      ...(formData.name && { campaign_name: formData.name }),
+      ...(formData.status && {
+        status: formData.status as GoogleCampaignStatus,
+      }),
+      ...(formData.objectiveType && {
+        objective_type: formData.objectiveType as GoogleObjectiveType,
+      }),
+      ...(formData.advertisingChannelType && {
+        advertising_channel_type:
+          GoogleAdvertisingChannelTypeMap[
+            enums.AdvertisingChannelType[formData.advertisingChannelType]
+          ] ?? existingCampaign.advertising_channel_type,
+      }),
+      ...(formData.biddingStrategyType && {
+        bidding_strategy_type:
+          BiddingStrategyTypeMap[
+            enums.BiddingStrategyType[formData.biddingStrategyType]
+          ] ?? existingCampaign.bidding_strategy_type,
+      }),
+      ...(biddingStrategyResourceName && {
+        bidding_strategy: biddingStrategyResourceName,
+      }),
+      ...(formData.biddingStrategyType && {
+        bidding_strategy_system_status: 'ENABLED',
+        payment_mode:
+          formData.biddingStrategyType === 'TARGET_CPA'
+            ? PaymentMode.CONVERSIONS
+            : PaymentMode.CLICKS,
+      }),
+      ...(budgetResourceName && {
+        campaign_budget: {
+          resourceName: budgetResourceName,
+          amount_micros:
+            formData.budgetOption === 'CREATE_NEW' && formData.newBudget
+              ? toMicros(Number(formData.newBudget.amount))
+              : (campaignBudget?.amount_micros ?? null),
+          delivery_method:
+            formData.budgetOption === 'CREATE_NEW' && formData.newBudget
+              ? (formData.newBudget.deliveryMethod ?? 'STANDARD')
+              : (campaignBudget?.delivery_method ?? 'STANDARD'),
+          explicitly_shared:
+            formData.budgetOption === 'CREATE_NEW' && formData.newBudget
+              ? (formData.newBudget.explicitly_shared ?? false)
+              : (campaignBudget?.explicitly_shared ?? false),
+        },
+      }),
+      ...(formData.networkSettings && {
+        network_settings: {
+          targetGoogleSearch: formData.networkSettings.targetGoogleSearch,
+          targetSearchNetwork: formData.networkSettings.targetSearchNetwork,
+          targetContentNetwork: formData.networkSettings.targetContentNetwork,
+          targetPartnerSearchNetwork:
+            formData.networkSettings.targetPartnerSearchNetwork,
+          targetYoutube: formData.networkSettings.targetYoutube,
+          targetGoogleTvNetwork: formData.networkSettings.targetGoogleTvNetwork,
+        },
+      }),
+      ...(formData.geoTargets && {
+        geo_targets: {
+          include: formData.geoTargets.include ?? geoTargets?.include ?? [],
+          exclude: formData.geoTargets.exclude ?? geoTargets?.exclude ?? [],
+        },
+      }),
+      ...(formData.languages && {
+        languages: {
+          include: formData.languages.include ?? languages?.include ?? [],
+          exclude: formData.languages.exclude ?? languages?.exclude ?? [],
+        },
+      }),
+      ...(formData.targetCpa && {
+        target_cpa_micros: toMicros(Number(formData.targetCpa)),
+      }),
+      ...(formData.targetRoas && {
+        target_roas: Number(formData.targetRoas),
+      }),
+      ...(formData.runSchedule?.start && {
+        start_date: new Date(formData.runSchedule.start),
+      }),
+      ...(formData.runSchedule?.end && {
+        end_date: new Date(formData.runSchedule.end),
+      }),
+      updated_at: new Date(),
+      data: {
+        ...((typeof existingCampaign.data === 'object' &&
+        existingCampaign.data !== null
+          ? existingCampaign.data
+          : {}) as Record<string, any>),
+        ...Object.fromEntries(
+          Object.entries(campaign).filter(
+            ([key]) => key !== 'url_custom_parameters',
+          ),
+        ),
+        resource_name: campaignResourceName,
+      },
+    };
+
+    try {
+      await this.prisma.googleCampaign.update({
+        where: { campaign_id: campaignId },
+        data: campaignData,
+      });
+      this.logger.log(`Updated campaign ${campaignId} in database`);
+    } catch (error: any) {
+      this.logger.error(`Database update failed: ${error.message}`, {
+        stack: error.stack,
+        code: error.code,
+      });
+      throw new InternalServerErrorException(
+        'Failed to update campaign in database',
+      );
+    }
+
+    return campaignResourceName;
   }
 
-  // Step 4.2: Add new geo target criteria
-  if (formData.geoTargets) {
-    formData.geoTargets.include?.forEach((target) => {
-      criteriaOperations.push({
-        create: {
-          campaign: campaignResourceName,
-          type: enums.CriterionType.LOCATION,
-          location: { geo_target_constant: `geoTargetConstants/${target.value}` },
-        },
-      });
-    });
+  async deleteCampaign(campaignId: string): Promise<void> {
+    this.logger.log(`Deleting campaign ${campaignId}`);
 
-    formData.geoTargets.exclude?.forEach((target) => {
-      criteriaOperations.push({
-        create: {
-          campaign: campaignResourceName,
-          type: enums.CriterionType.LOCATION,
-          location: { geo_target_constant: `geoTargetConstants/${target.value}` },
-          negative: true,
-        },
-      });
+    // Fetch platform credentials
+    const creds = await this.googleService.getGoogleCredentials();
+    const platform = await this.prisma.marketingPlatform.findFirst({
+      where: { orgId: 'single-org', platform_name: 'Google' },
     });
-  }
+    if (!platform) {
+      this.logger.error('Google marketing platform not found');
+      throw new InternalServerErrorException(
+        'Google marketing platform not found',
+      );
+    }
 
-  // Step 4.3: Add new language criteria
-  if (formData.languages) {
-    formData.languages.include?.forEach((target) => {
-      criteriaOperations.push({
-        create: {
-          campaign: campaignResourceName,
-          type: enums.CriterionType.LANGUAGE,
-          language: { language_constant: `languageConstants/${target.value}` },
-        },
-      });
+    const platformCreds = await this.prisma.platformCredentials.findFirst({
+      where: { type: 'AUTH', user_id: null, platform_id: platform.platform_id },
     });
-    // Note: Excluded languages are not supported in Google Ads API, so we ignore languages.exclude
-  }
+    if (!platformCreds || !platformCreds.refresh_token) {
+      this.logger.error('No valid Google platform credentials found');
+      throw new ForbiddenException(
+        'No valid Google platform credentials found',
+      );
+    }
 
-  // Step 4.4: Apply new criteria
-  if (criteriaOperations.length > 0) {
+    const googleAccount = await this.prisma.googleAccount.findFirst({
+      where: { orgId: 'single-org' },
+    });
+    if (!googleAccount || !googleAccount.mccId) {
+      this.logger.error('Google account or MCC ID not found');
+      throw new InternalServerErrorException(
+        'Google account or MCC ID not found',
+      );
+    }
+
+    // Verify campaign exists and get customerAccountId
+    const existingCampaign = await this.prisma.googleCampaign.findUnique({
+      where: { campaign_id: campaignId },
+    });
+    if (!existingCampaign) {
+      this.logger.error(`Campaign with ID ${campaignId} not found in database`);
+      throw new NotFoundException(`Campaign with ID ${campaignId} not found`);
+    }
+
+    const customerAccountId = existingCampaign.customer_account_id;
+
+    // Get valid access token
+    const accessToken = await this.googleService.getValidAccessToken(
+      creds.clientId,
+      creds.clientSecret,
+      platformCreds.refresh_token,
+      platform.platform_id,
+    );
+
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      'developer-token': creds.developerToken,
+      'login-customer-id': googleAccount.mccId,
+      'Content-Type': 'application/json',
+    };
+
+    const campaignResourceName = ResourceNames.campaign(
+      customerAccountId,
+      campaignId,
+    );
+
+    // Delete campaign via Google Ads API
+    const campaignEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/campaigns:mutate`;
+    const campaignOperation = {
+      remove: campaignResourceName,
+    };
+
     try {
       const response = await axios.post(
-        criteriaEndpoint,
-        { operations: criteriaOperations },
+        campaignEndpoint,
+        { operations: [campaignOperation] },
         { headers },
       );
       if (response.status !== 200) {
-        throw new Error(`Criteria creation failed with status ${response.status}`);
+        throw new Error(
+          `Campaign deletion failed with status ${response.status}`,
+        );
       }
-      this.logger.log(`Created ${criteriaOperations.length} new campaign criteria`);
+      this.logger.log(
+        `Deleted campaign from Google Ads: ${campaignResourceName}`,
+      );
     } catch (error: any) {
-      this.logger.error(`Criteria creation failed: ${error.message}`, {
+      this.logger.error(`Campaign deletion failed: ${error.message}`, {
         stack: error.stack,
         details: JSON.stringify(error.response?.data || {}),
       });
-      throw new InternalServerErrorException('Failed to create new campaign criteria');
+      throw new InternalServerErrorException(
+        'Failed to delete campaign from Google Ads',
+      );
+    }
+
+    // Delete campaign from database
+    try {
+      await this.prisma.googleCampaign.delete({
+        where: { campaign_id: campaignId },
+      });
+      this.logger.log(`Deleted campaign ${campaignId} from database`);
+    } catch (error: any) {
+      this.logger.error(`Database deletion failed: ${error.message}`, {
+        stack: error.stack,
+        code: error.code,
+      });
+      throw new InternalServerErrorException(
+        'Failed to delete campaign from database',
+      );
     }
   }
-}
-
-// Define interfaces for geo_targets and languages
-interface GeoTargets {
-  include: { value: string; text: string }[];
-  exclude: { value: string; text: string }[];
-}
-
-interface Languages {
-  include: { value: string; text: string }[];
-  exclude: { value: string; text: string }[];
-}
-
-// Safely access geo_targets and languages
-const geoTargets = existingCampaign.geo_targets as GeoTargets | null;
-const languages = existingCampaign.languages as Languages | null;
-  // ----------------------------
-  // STEP 5: Save Updated Campaign to Database
-  // ----------------------------
- const campaignData: Prisma.GoogleCampaignUpdateInput = {
-  ...(formData.name && { campaign_name: formData.name }),
-  ...(formData.status && { status: formData.status as GoogleCampaignStatus }),
-  ...(formData.objectiveType && { objective_type: formData.objectiveType as GoogleObjectiveType }),
-  ...(formData.advertisingChannelType && {
-    advertising_channel_type: GoogleAdvertisingChannelTypeMap[
-      enums.AdvertisingChannelType[formData.advertisingChannelType]
-    ] ?? existingCampaign.advertising_channel_type,
-  }),
-  ...(formData.biddingStrategyType && {
-    bidding_strategy_type: BiddingStrategyTypeMap[
-      enums.BiddingStrategyType[formData.biddingStrategyType]
-    ] ?? existingCampaign.bidding_strategy_type,
-  }),
-  ...(biddingStrategyResourceName && { bidding_strategy: biddingStrategyResourceName }),
-  ...(formData.biddingStrategyType && {
-    bidding_strategy_system_status: 'ENABLED',
-    payment_mode:
-      formData.biddingStrategyType === 'TARGET_CPA'
-        ? PaymentMode.CONVERSIONS
-        : PaymentMode.CLICKS,
-  }),
-  ...(budgetResourceName && {
-    campaign_budget: {
-      resourceName: budgetResourceName,
-      amount_micros:
-        formData.budgetOption === 'CREATE_NEW' && formData.newBudget
-          ? toMicros(Number(formData.newBudget.amount))
-          : campaignBudget?.amount_micros ?? null,
-      delivery_method:
-        formData.budgetOption === 'CREATE_NEW' && formData.newBudget
-          ? formData.newBudget.deliveryMethod ?? 'STANDARD'
-          : campaignBudget?.delivery_method ?? 'STANDARD',
-      explicitly_shared:
-        formData.budgetOption === 'CREATE_NEW' && formData.newBudget
-          ? formData.newBudget.explicitly_shared ?? false
-          : campaignBudget?.explicitly_shared ?? false,
-    },
-  }),
-  ...(formData.networkSettings && {
-    network_settings: {
-      targetGoogleSearch: formData.networkSettings.targetGoogleSearch,
-      targetSearchNetwork: formData.networkSettings.targetSearchNetwork,
-      targetContentNetwork: formData.networkSettings.targetContentNetwork,
-      targetPartnerSearchNetwork: formData.networkSettings.targetPartnerSearchNetwork,
-      targetYoutube: formData.networkSettings.targetYoutube,
-      targetGoogleTvNetwork: formData.networkSettings.targetGoogleTvNetwork,
-    },
-  }),
-  ...(formData.geoTargets && {
-    geo_targets: {
-      include: formData.geoTargets.include ?? geoTargets?.include ?? [],
-      exclude: formData.geoTargets.exclude ?? geoTargets?.exclude ?? [],
-    },
-  }),
-  ...(formData.languages && {
-    languages: {
-      include: formData.languages.include ?? languages?.include ?? [],
-      exclude: formData.languages.exclude ?? languages?.exclude ?? [],
-    },
-  }),
-  ...(formData.targetCpa && {
-    target_cpa_micros: toMicros(Number(formData.targetCpa)),
-  }),
-  ...(formData.targetRoas && {
-    target_roas: Number(formData.targetRoas),
-  }),
-  ...(formData.runSchedule?.start && {
-    start_date: new Date(formData.runSchedule.start),
-  }),
-  ...(formData.runSchedule?.end && {
-    end_date: new Date(formData.runSchedule.end),
-  }),
-  updated_at: new Date(),
-  data: {
-    ...((typeof existingCampaign.data === 'object' && existingCampaign.data !== null
-      ? existingCampaign.data
-      : {}) as Record<string, any>),
-    ...Object.fromEntries(
-      Object.entries(campaign).filter(([key]) => key !== 'url_custom_parameters'),
-    ),
-    resource_name: campaignResourceName,
-  },
-};
-
-  try {
-    await this.prisma.googleCampaign.update({
-      where: { campaign_id: campaignId },
-      data: campaignData,
-    });
-    this.logger.log(`Updated campaign ${campaignId} in database`);
-  } catch (error: any) {
-    this.logger.error(`Database update failed: ${error.message}`, {
-      stack: error.stack,
-      code: error.code,
-    });
-    throw new InternalServerErrorException('Failed to update campaign in database');
-  }
-
-  return campaignResourceName;
-}
-
-
-async deleteCampaign(campaignId: string): Promise<void> {
-  this.logger.log(`Deleting campaign ${campaignId}`);
-
-  // Fetch platform credentials
-  const creds = await this.googleService.getGoogleCredentials();
-  const platform = await this.prisma.marketingPlatform.findFirst({
-    where: { orgId: 'single-org', platform_name: 'Google' },
-  });
-  if (!platform) {
-    this.logger.error('Google marketing platform not found');
-    throw new InternalServerErrorException('Google marketing platform not found');
-  }
-
-  const platformCreds = await this.prisma.platformCredentials.findFirst({
-    where: { type: 'AUTH', user_id: null, platform_id: platform.platform_id },
-  });
-  if (!platformCreds || !platformCreds.refresh_token) {
-    this.logger.error('No valid Google platform credentials found');
-    throw new ForbiddenException('No valid Google platform credentials found');
-  }
-
-  const googleAccount = await this.prisma.googleAccount.findFirst({
-    where: { orgId: 'single-org' },
-  });
-  if (!googleAccount || !googleAccount.mccId) {
-    this.logger.error('Google account or MCC ID not found');
-    throw new InternalServerErrorException('Google account or MCC ID not found');
-  }
-
-  // Verify campaign exists and get customerAccountId
-  const existingCampaign = await this.prisma.googleCampaign.findUnique({
-    where: { campaign_id: campaignId },
-  });
-  if (!existingCampaign) {
-    this.logger.error(`Campaign with ID ${campaignId} not found in database`);
-    throw new NotFoundException(`Campaign with ID ${campaignId} not found`);
-  }
-
-  const customerAccountId = existingCampaign.customer_account_id;
-
-  // Get valid access token
-  const accessToken = await this.googleService.getValidAccessToken(
-    creds.clientId,
-    creds.clientSecret,
-    platformCreds.refresh_token,
-    platform.platform_id,
-  );
-
-  const headers = {
-    Authorization: `Bearer ${accessToken}`,
-    'developer-token': creds.developerToken,
-    'login-customer-id': googleAccount.mccId,
-    'Content-Type': 'application/json',
-  };
-
-  const campaignResourceName = ResourceNames.campaign(customerAccountId, campaignId);
-
-  // Delete campaign via Google Ads API
-  const campaignEndpoint = `https://googleads.googleapis.com/v20/customers/${customerAccountId}/campaigns:mutate`;
-  const campaignOperation = {
-    remove: campaignResourceName,
-  };
-
-  try {
-    const response = await axios.post(
-      campaignEndpoint,
-      { operations: [campaignOperation] },
-      { headers },
-    );
-    if (response.status !== 200) {
-      throw new Error(`Campaign deletion failed with status ${response.status}`);
-    }
-    this.logger.log(`Deleted campaign from Google Ads: ${campaignResourceName}`);
-  } catch (error: any) {
-    this.logger.error(`Campaign deletion failed: ${error.message}`, {
-      stack: error.stack,
-      details: JSON.stringify(error.response?.data || {}),
-    });
-    throw new InternalServerErrorException('Failed to delete campaign from Google Ads');
-  }
-
-  // Delete campaign from database
-  try {
-    await this.prisma.googleCampaign.delete({
-      where: { campaign_id: campaignId },
-    });
-    this.logger.log(`Deleted campaign ${campaignId} from database`);
-  } catch (error: any) {
-    this.logger.error(`Database deletion failed: ${error.message}`, {
-      stack: error.stack,
-      code: error.code,
-    });
-    throw new InternalServerErrorException('Failed to delete campaign from database');
-  }
-}
-
 }

@@ -15,6 +15,7 @@ import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { UpdateCampaignDto } from './dto/update-campaign.dto';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
 import { ObjectiveType } from '@prisma/client';
+import { LinkedInCampaignsService } from './linkedin/linkedinCampaign.service';
 
 interface AuthenticatedRequest extends Request {
   user?: { user_id: string; email: string; orgId: string; role: string };
@@ -35,7 +36,10 @@ interface AudienceCountRequest {
 
 @Controller('campaigns')
 export class CampaignsController {
-  constructor(private readonly campaignsService: CampaignsService) {}
+  constructor(private readonly campaignsService: CampaignsService,
+    private readonly linkedinCampaignsService: LinkedInCampaignsService
+
+  ) {}
 
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -211,7 +215,7 @@ export class CampaignsController {
   ) {
     const user = req.user as { user_id: string; orgId: string };
     const configRecord =
-      await this.campaignsService.createOrUpdateLinkedInCampaignConfig(
+      await this.linkedinCampaignsService.createOrUpdateLinkedInCampaignConfig(
         user.orgId,
         config,
       );
