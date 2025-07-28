@@ -1245,4 +1245,111 @@ export class GoogleAdsService {
 
     return adResourceName;
   }
+
+
+async getImageAssetDetails(assetResourceName: string): Promise<{
+  name: string | null;
+  url: string | null;
+}> {
+  this.logger.log(`Fetching image asset details for ${assetResourceName}`);
+
+  // Extract customer ID from resource name
+  const customerIdMatch = assetResourceName.match(/^customers\/(\d+)\/assets\/\d+$/);
+  if (!customerIdMatch) {
+    this.logger.error(`Invalid asset resource name: ${assetResourceName}`);
+    throw new BadRequestException('Invalid asset resource name');
+  }
+  const customerId = customerIdMatch[1];
+
+  // Get credentials and platform details
+  const creds = await this.googleService.getGoogleCredentials();
+  const platform = await this.prisma.marketingPlatform.findFirst({
+    where: { orgId: 'single-org', platform_name: 'Google' },
+  });
+  if (!platform) {
+    this.logger.error('Google marketing platform not found');
+    throw new InternalServerErrorException('Google marketing platform not found');
+  }
+
+  const platformCreds = await this.prisma.platformCredentials.findFirst({
+    where: { platform_id: platform.platform_id, type: 'AUTH', user_id: null },
+  });
+  if (!platformCreds || !platformCreds.refresh_token) {
+    this.logger.error('No valid Google platform credentials found');
+    throw new ForbiddenException('No valid Google platform credentials found');
+  }
+
+  const googleAccount = await this.prisma.googleAccount.findFirst({
+    where: { orgId: 'single-org' },
+  });
+  if (!googleAccount || !googleAccount.mccId) {
+    this.logger.error('Google account or MCC ID not found');
+    throw new InternalServerErrorException('Google account or MCC ID not found');
+  }
+
+  // Initialize Google Ads API client
+  const client = new GoogleAdsApi({
+    client_id: creds.clientId,
+    client_secret: creds.clientSecret,
+    developer_token: creds.developerToken,
+  });
+
+  const customer = client.Customer({
+    customer_id: customerId,
+    refresh_token: platformCreds.refresh_token,
+    login_customer_id: googleAccount.mccId,
+  });
+
+  // Define interface for asset response
+  interface AssetResponse {
+    name?: string | null;
+    image_asset?: {
+      full_size?: {
+        url?: string | null;
+      } | null;
+    } | null;
+  }
+
+  // Query asset details
+  try {
+    const response = await customer.query(`
+      SELECT asset.name, asset.image_asset.full_size.url
+      FROM asset
+      WHERE asset.resource_name = '${assetResourceName}'
+      AND asset.type = 'IMAGE'
+    `);
+
+    const results: AssetResponse[] = [];
+    for await (const row of response) {
+      results.push(row.asset as AssetResponse);
+    }
+
+    if (results.length === 0) {
+      this.logger.error(`No image asset found for ${assetResourceName}`);
+      throw new NotFoundException(`Image asset not found for ${assetResourceName}`);
+    }
+
+    const asset = results[0];
+    this.logger.log(`Fetched image asset details for ${assetResourceName}`);
+    return {
+      name: asset.name || null,
+      url: asset.image_asset?.full_size?.url || null,
+    };
+  } catch (error: any) {
+    this.logger.error(`Failed to fetch image asset details: ${error.message}`, {
+      stack: error.stack,
+      details: JSON.stringify(error.response?.data || {}),
+    });
+    if (error.response?.status === 401) {
+      throw new UnauthorizedException('Invalid or expired access token');
+    }
+    if (error.response?.status === 403) {
+      throw new ForbiddenException('Missing required scopes (adwords)');
+    }
+    if (error.response?.status === 429) {
+      throw new Error('Rate limit exceeded');
+    }
+    throw new InternalServerErrorException('Failed to fetch image asset details');
+  }
+}
 }

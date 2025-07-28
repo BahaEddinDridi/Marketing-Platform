@@ -377,4 +377,23 @@ export class GoogleCampaignController {
       );
     }
   }
+
+  @Get('/image-asset/:assetResourceName')
+  @UseGuards(JwtAuthGuard)
+  async getImageAssetDetails(
+    @Param('assetResourceName') assetResourceName: string,
+  ) {
+    try {
+      const assetDetails =
+        await this.googleAdsService.getImageAssetDetails(assetResourceName);
+      return { success: true, assetDetails };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to fetch image asset details: ${error.message}`,
+      );
+      throw new InternalServerErrorException(
+        `Failed to fetch image asset details: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
 }

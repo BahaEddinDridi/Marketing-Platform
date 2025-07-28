@@ -35,6 +35,25 @@ export class LeadController {
     return this.leadService.findAll();
   }
 
+  @Post('create')
+  @UseGuards(JwtAuthGuard)
+  async createLead(
+    @Req() req: AuthenticatedRequest,
+    @Body()
+    leadInputs: {
+      name: string;
+      email: string;
+      phone?: string | null;
+      company?: string | null;
+      jobTitle?: string | null;
+      status?: LeadStatus;
+      source?: string;
+    },
+  ) {
+    const user = req.user as { user_id: string; email: string; orgId: string };
+    return this.leadService.createLead(user.user_id, leadInputs);
+  }
+  
   @Get('fetch')
   @UseGuards(JwtAuthGuard)
   async fetchEmails(@Req() req: AuthenticatedRequest) {
@@ -148,7 +167,9 @@ export class LeadController {
       sharedMailbox?: string;
     },
   ) {
-    console.log(`Received lead config update for org ${orgId}: ${JSON.stringify(data, null, 2)}`);
+    console.log(
+      `Received lead config update for org ${orgId}: ${JSON.stringify(data, null, 2)}`,
+    );
     const user = req.user as { orgId: string };
     if (user.orgId !== orgId)
       throw new HttpException('Forbidden', HttpStatus.FORBIDDEN);

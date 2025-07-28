@@ -1944,4 +1944,97 @@ export class LeadService {
       );
     }
   }
+
+
+  async createLead(
+  userId: string,
+  leadInputs: {
+    name: string;
+    email: string;
+    phone?: string | null;
+    company?: string | null;
+    jobTitle?: string | null;
+    status?: LeadStatus;
+    source?: string;
+  },
+) {
+  this.logger.log(`Creating lead for userId: ${userId} with inputs: ${JSON.stringify(leadInputs)}`);
+
+  try {
+    // Validate the user
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+      select: { orgId: true, role: true },
+    });
+
+    if (!user) {
+      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+    }
+
+    // Optionally restrict to ADMIN or specific roles
+    if (user.role !== 'ADMIN') {
+      throw new HttpException(
+        'Only admins can create leads',
+        HttpStatus.FORBIDDEN,
+      );
+    }
+
+    // Validate required fields
+    if (!leadInputs.name || !leadInputs.email) {
+      throw new HttpException(
+        'Name and email are required',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    // Prepare lead data
+    const leadData: Prisma.LeadCreateInput = {
+      organization: { connect: { id: user.orgId } },
+      source: leadInputs.source || 'manual',
+      name: leadInputs.name,
+      email: leadInputs.email.toLowerCase(),
+      phone: leadInputs.phone || null,
+      company: leadInputs.company || null,
+      job_title: leadInputs.jobTitle || null,
+      status: leadInputs.status || 'NEW',
+      assignedTo: { connect: { user_id: userId } },
+      created_at: new Date(),
+    };
+
+    // Create the lead
+    const newLead = await this.prisma.lead.create({
+      data: leadData,
+      include: {
+        assignedTo: {
+          select: {
+            user_id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    this.logger.log(`Lead created successfully with ID: ${newLead.lead_id}`);
+    return {
+      leadId: newLead.lead_id,
+      source: newLead.source,
+      name: newLead.name,
+      email: newLead.email,
+      phone: newLead.phone,
+      company: newLead.company,
+      jobTitle: newLead.job_title,
+      status: newLead.status,
+      assignedTo: newLead.assignedTo,
+      createdAt: newLead.created_at,
+    };
+  } catch (error) {
+    this.logger.error(`Error creating lead for user ${userId}: ${error.message}`);
+    throw new HttpException(
+      'Failed to create lead',
+      HttpStatus.INTERNAL_SERVER_ERROR,
+    );
+  }
+}
 }

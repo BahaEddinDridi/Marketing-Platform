@@ -14,7 +14,7 @@ import { CampaignsService, LinkedInCampaignInput } from './campaigns.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { UpdateCampaignDto } from './dto/update-campaign.dto';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
-import { ObjectiveType } from '@prisma/client';
+import { CampaignStatus, ObjectiveType } from '@prisma/client';
 import { LinkedInCampaignsService } from './linkedin/linkedinCampaign.service';
 
 interface AuthenticatedRequest extends Request {
@@ -48,13 +48,24 @@ export class CampaignsController {
   }
 
   @Get()
-  @UseGuards(JwtAuthGuard)
-  findAll(@Query('page') page: string, @Query('pageSize') pageSize: string) {
-    return this.campaignsService.findAll(
-      parseInt(page) || 1,
-      parseInt(pageSize) || 10,
-    );
-  }
+@UseGuards(JwtAuthGuard)
+findAll(
+  @Query('page') page: string,
+  @Query('pageSize') pageSize: string,
+  @Query('campaignGroupId') campaignGroupId?: string,
+  @Query('objective') objective?: string,
+  @Query('status') status?: string,
+  @Query('search') search?: string,
+) {
+  return this.campaignsService.findAll(
+    parseInt(page) || 1,
+    parseInt(pageSize) || 10,
+    campaignGroupId,
+    objective as ObjectiveType,
+    status as CampaignStatus,
+    search,
+  );
+}
 
   @Get(':id')
   @UseGuards(JwtAuthGuard)

@@ -192,7 +192,14 @@ export class CampaignsService {
     return this.prisma.marketingCampaign.create({ data: createCampaignDto });
   }
 
-  async findAll(page: number = 1, pageSize: number = 5): Promise<{
+  async findAll(
+  page: number = 1,
+  pageSize: number = 5,
+  campaignGroupId?: string,
+  objective?: ObjectiveType,
+  status?: CampaignStatus,
+  search?: string,
+): Promise<{
   campaigns: CampaignResponse[];
   pagination: {
     currentPage: number;
@@ -202,11 +209,34 @@ export class CampaignsService {
 }> {
   const skip = (page - 1) * pageSize;
   const take = pageSize;
+this.logger.log("queries", campaignGroupId, objective, status, search)
+  // Build the where clause dynamically
+  const where: any = {};
 
-  // Fetch paginated campaigns
+  if (campaignGroupId) {
+    where.campaign_group_id = campaignGroupId;
+  }
+
+  if (objective && Object.values(ObjectiveType).includes(objective)) {
+    where.objective = objective;
+  }
+
+  if (status && Object.values(CampaignStatus).includes(status)) {
+    where.status = status;
+  }
+
+  if (search) {
+    where.campaign_name = {
+      contains: search,
+      mode: 'insensitive', // Case-insensitive search
+    };
+  }
+
+  // Fetch paginated campaigns with filters
   const campaigns = await this.prisma.marketingCampaign.findMany({
     skip,
     take,
+    where,
     orderBy: {
       updated_at: 'desc', // Sort by updated_at, newest first
     },
@@ -247,10 +277,12 @@ export class CampaignsService {
     },
   });
 
-  // Get total count for pagination metadata
-  const totalItems = await this.prisma.marketingCampaign.count();
+  // Get total count for pagination metadata with the same filters
+  const totalItems = await this.prisma.marketingCampaign.count({ where });
   const totalPages = Math.ceil(totalItems / pageSize);
-  this.logger.log("totalItems + totalPages", totalItems, totalPages)
+
+  this.logger.log('totalItems + totalPages', totalItems, totalPages);
+
   return {
     campaigns,
     pagination: {
