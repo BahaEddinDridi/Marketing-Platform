@@ -11,6 +11,7 @@ import axios from 'axios';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { v4 as uuidv4 } from 'uuid';
 import { Prisma, CampaignStatus, ObjectiveType } from '@prisma/client';
+import { decrypt, encrypt } from 'src/middlewares/crypto.helper';
 
 const mapToPrismaEnum = <T extends Record<string, string>>(
   value: string,
@@ -49,7 +50,6 @@ interface LinkedInAdAccountDetails {
     versionTag: string;
   };
 }
-
 
 interface LinkedInTokenResponse {
   access_token: string;
@@ -162,8 +162,8 @@ export class LinkedInService {
       where: { id: 'single-org' },
       data: {
         linkedInCreds: {
-          clientId: creds.clientId,
-          clientSecret: creds.clientSecret,
+          clientId: encrypt(creds.clientId),
+          clientSecret: encrypt(creds.clientSecret),
         },
       },
     });
@@ -286,7 +286,7 @@ export class LinkedInService {
       );
     }
 
-    return { clientId, clientSecret };
+    return { clientId: decrypt(clientId), clientSecret: decrypt(clientSecret) };
   }
 
   async validateLinkedInUser(
@@ -902,65 +902,66 @@ export class LinkedInService {
         });
 
         let adAccountDetails: LinkedInAdAccountDetails | null = null;
-      try {
-        const detailsUrl = `https://api.linkedin.com/rest/adAccounts/${accountId}`;
-        this.logger.log(`Fetching ad account details: ${detailsUrl}`);
-        
-        const detailsResponse = await axios.get<LinkedInAdAccountDetails>(detailsUrl, { headers });
-        adAccountDetails = detailsResponse.data;
-        
-        this.logger.log(
-          `Fetched ad account details: ${JSON.stringify(adAccountDetails, null, 2)}`,
-        );
-      } catch (error) {
-        this.logger.warn(
-          `Failed to fetch details for ad account ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+        try {
+          const detailsUrl = `https://api.linkedin.com/rest/adAccounts/${accountId}`;
+          this.logger.log(`Fetching ad account details: ${detailsUrl}`);
 
+          const detailsResponse = await axios.get<LinkedInAdAccountDetails>(
+            detailsUrl,
+            { headers },
+          );
+          adAccountDetails = detailsResponse.data;
+
+          this.logger.log(
+            `Fetched ad account details: ${JSON.stringify(adAccountDetails, null, 2)}`,
+          );
+        } catch (error) {
+          this.logger.warn(
+            `Failed to fetch details for ad account ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
 
         // Upsert AdAccount
         await this.prisma.adAccount.upsert({
-        where: {
-          organizationId_id: {
-            organizationId: linkedInPage.organizationId,
-            id: accountId,
+          where: {
+            organizationId_id: {
+              organizationId: linkedInPage.organizationId,
+              id: accountId,
+            },
           },
-        },
-        update: {
-          role: element.role,
-          userUrn: element.user,
-          accountUrn: element.account,
-          changeAuditStamps: element.changeAuditStamps,
-          ...(adAccountDetails && {
-            name: adAccountDetails.name,
-            status: adAccountDetails.status,
-            type: adAccountDetails.type,
-            currency: adAccountDetails.currency,
-            test: adAccountDetails.test,
-            servingStatuses: adAccountDetails.servingStatuses || [],
-          }),
-          updatedAt: new Date(),
-        },
-        create: {
-          id: accountId,
-          organizationId: linkedInPage.organizationId,
-          linkedInPageId: linkedInPage.id,
-          accountUrn: element.account,
-          role: element.role,
-          userUrn: element.user,
-          changeAuditStamps: element.changeAuditStamps,
-          ...(adAccountDetails && {
-            name: adAccountDetails.name,
-            status: adAccountDetails.status,
-            type: adAccountDetails.type,
-            currency: adAccountDetails.currency,
-            test: adAccountDetails.test,
-            servingStatuses: adAccountDetails.servingStatuses || [],
-          }),
-        },
-      });
-    
+          update: {
+            role: element.role,
+            userUrn: element.user,
+            accountUrn: element.account,
+            changeAuditStamps: element.changeAuditStamps,
+            ...(adAccountDetails && {
+              name: adAccountDetails.name,
+              status: adAccountDetails.status,
+              type: adAccountDetails.type,
+              currency: adAccountDetails.currency,
+              test: adAccountDetails.test,
+              servingStatuses: adAccountDetails.servingStatuses || [],
+            }),
+            updatedAt: new Date(),
+          },
+          create: {
+            id: accountId,
+            organizationId: linkedInPage.organizationId,
+            linkedInPageId: linkedInPage.id,
+            accountUrn: element.account,
+            role: element.role,
+            userUrn: element.user,
+            changeAuditStamps: element.changeAuditStamps,
+            ...(adAccountDetails && {
+              name: adAccountDetails.name,
+              status: adAccountDetails.status,
+              type: adAccountDetails.type,
+              currency: adAccountDetails.currency,
+              test: adAccountDetails.test,
+              servingStatuses: adAccountDetails.servingStatuses || [],
+            }),
+          },
+        });
       }
 
       // Log the mapped ad accounts
@@ -1178,7 +1179,7 @@ export class LinkedInService {
           'email',
           'openid',
           'r_ads_leadgen_automation',
-          'r_marketing_leadgen_automation'
+          'r_marketing_leadgen_automation',
         ],
         profile._json.websiteURL || '',
         profile._json.description || '',

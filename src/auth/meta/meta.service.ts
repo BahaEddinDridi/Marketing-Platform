@@ -11,6 +11,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import axios from 'axios';
 import * as qs from 'querystring';
 import { Prisma } from '@prisma/client';
+import { decrypt, encrypt } from 'src/middlewares/crypto.helper';
 
 @Injectable()
 export class MetaService {
@@ -51,9 +52,9 @@ export class MetaService {
       where: { id: 'single-org' },
       data: {
         metaCreds: {
-          clientId: creds.clientId,
-          clientSecret: creds.clientSecret,
-          businessManagerId: creds.businessManagerId,
+          clientId: encrypt(creds.clientId),
+          clientSecret: encrypt(creds.clientSecret),
+          businessManagerId: encrypt(creds.businessManagerId),
         },
       },
     });
@@ -88,9 +89,9 @@ export class MetaService {
     return { clientId: '', clientSecret: '', businessManagerId: '' };
   }
 
-    return { clientId, clientSecret, businessManagerId };
+    return { clientId: decrypt(clientId), clientSecret: decrypt(clientSecret), businessManagerId: decrypt(businessManagerId) };
   }
-
+  
   async generateAuthUrl(): Promise<{ url: string }> {
     const { clientId } = await this.getMetaCredentials();
     const redirectUri = this.configService.get('META_CALLBACK_URL');

@@ -12,6 +12,7 @@ import { GoogleAdsApi } from 'google-ads-api';
 import axios from 'axios';
 import * as qs from 'querystring';
 import { Prisma } from '@prisma/client';
+import { decrypt, encrypt } from 'src/middlewares/crypto.helper';
 
 @Injectable()
 export class GoogleService {
@@ -53,10 +54,10 @@ export class GoogleService {
       where: { id: 'single-org' },
       data: {
         googleCreds: {
-          clientId: creds.clientId,
-          clientSecret: creds.clientSecret,
-          developerToken: creds.developerToken,
-          customerAccountId: creds.customerAccountId,
+          clientId: encrypt(creds.clientId),
+          clientSecret: encrypt(creds.clientSecret),
+          developerToken: encrypt(creds.developerToken),
+          customerAccountId: encrypt(creds.customerAccountId),
         },
       },
     });
@@ -100,7 +101,12 @@ export class GoogleService {
       );
     }
 
-    return { clientId, clientSecret, developerToken, customerAccountId };
+    return {
+      clientId: decrypt(clientId),
+      clientSecret: decrypt(clientSecret),
+      developerToken: decrypt(developerToken),
+      customerAccountId: decrypt(customerAccountId),
+    };
   }
 
   async testConnection(userId: string) {
@@ -113,7 +119,9 @@ export class GoogleService {
       throw new UnauthorizedException('User not found');
     }
     if (user.role !== 'ADMIN') {
-      this.logger.warn(`User ${userId} attempted to test connection without ADMIN role`);
+      this.logger.warn(
+        `User ${userId} attempted to test connection without ADMIN role`,
+      );
       throw new ForbiddenException('Only admins can test Google connection');
     }
 
@@ -131,14 +139,13 @@ export class GoogleService {
       where: { orgId: org.id, platform_name: 'Google' },
     });
     if (!platform) {
-        platform = await this.prisma.marketingPlatform.create({
-          data: {
-            orgId: org.id,
-            platform_name: 'Google',
-          },
-        });
-      }
-
+      platform = await this.prisma.marketingPlatform.create({
+        data: {
+          orgId: org.id,
+          platform_name: 'Google',
+        },
+      });
+    }
 
     const platformCreds = await this.prisma.platformCredentials.findFirst({
       where: {
@@ -272,36 +279,37 @@ export class GoogleService {
       }
 
       // 3. Upsert the platformCredentials of type "AUTH" and user_id = null
-       const existingCredentials = await this.prisma.platformCredentials.findFirst({
-      where: {
-        platform_id: platform.platform_id,
-        user_id: null,
-        type: 'AUTH',
-      },
-    });
+      const existingCredentials =
+        await this.prisma.platformCredentials.findFirst({
+          where: {
+            platform_id: platform.platform_id,
+            user_id: null,
+            type: 'AUTH',
+          },
+        });
 
-    if (existingCredentials) {
-      await this.prisma.platformCredentials.update({
-        where: { credential_id: existingCredentials.credential_id },
-        data: {
-          access_token,
-          refresh_token,
-          expires_at: new Date(Date.now() + expires_in * 1000),
-        },
-      });
-    } else {
-      await this.prisma.platformCredentials.create({
-        data: {
-          platform_id: platform.platform_id,
-          user_id: null,
-          type: 'AUTH',
-          access_token,
-          refresh_token,
-          expires_at: new Date(Date.now() + expires_in * 1000),
-          scopes: [], // Make sure to include required fields
-        },
-      });
-    }
+      if (existingCredentials) {
+        await this.prisma.platformCredentials.update({
+          where: { credential_id: existingCredentials.credential_id },
+          data: {
+            access_token,
+            refresh_token,
+            expires_at: new Date(Date.now() + expires_in * 1000),
+          },
+        });
+      } else {
+        await this.prisma.platformCredentials.create({
+          data: {
+            platform_id: platform.platform_id,
+            user_id: null,
+            type: 'AUTH',
+            access_token,
+            refresh_token,
+            expires_at: new Date(Date.now() + expires_in * 1000),
+            scopes: [], // Make sure to include required fields
+          },
+        });
+      }
 
       return { refresh_token, access_token, expires_in };
     } catch (error) {
@@ -314,71 +322,75 @@ export class GoogleService {
   }
 
   async connectAndFetchMCCInfo(userId: string) {
-  // Verify user existence and role
-  this.logger.log("we are here")
-  const user = await this.prisma.user.findUnique({
-    where: { user_id: userId },
-  });
-  if (!user) {
-    this.logger.error(`User with ID ${userId} not found`);
-    throw new UnauthorizedException('User not found');
-  }
-  if (user.role !== 'ADMIN') {
-    this.logger.warn(`User ${userId} attempted to connect MCC without ADMIN role`);
-    throw new ForbiddenException('Only admins can connect MCC accounts');
-  }
+    // Verify user existence and role
+    this.logger.log('we are here');
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+    });
+    if (!user) {
+      this.logger.error(`User with ID ${userId} not found`);
+      throw new UnauthorizedException('User not found');
+    }
+    if (user.role !== 'ADMIN') {
+      this.logger.warn(
+        `User ${userId} attempted to connect MCC without ADMIN role`,
+      );
+      throw new ForbiddenException('Only admins can connect MCC accounts');
+    }
 
-  // Get organization
-  const org = await this.prisma.organization.findUnique({
-    where: { id: 'single-org' },
-  });
-  if (!org) {
-    this.logger.error('Organization not found for id: single-org');
-    throw new InternalServerErrorException('Organization not found');
-  }
+    // Get organization
+    const org = await this.prisma.organization.findUnique({
+      where: { id: 'single-org' },
+    });
+    if (!org) {
+      this.logger.error('Organization not found for id: single-org');
+      throw new InternalServerErrorException('Organization not found');
+    }
 
-  // Check for existing platform credentials
-  const platform = await this.prisma.marketingPlatform.findFirst({
-    where: { orgId: org.id, platform_name: 'Google' },
-  });
-  if (!platform) {
-    this.logger.error('Google marketing platform not found');
-    throw new InternalServerErrorException('Google marketing platform not found');
-  }
+    // Check for existing platform credentials
+    const platform = await this.prisma.marketingPlatform.findFirst({
+      where: { orgId: org.id, platform_name: 'Google' },
+    });
+    if (!platform) {
+      this.logger.error('Google marketing platform not found');
+      throw new InternalServerErrorException(
+        'Google marketing platform not found',
+      );
+    }
 
-  const platformCreds = await this.prisma.platformCredentials.findFirst({
-    where: {
-      platform_id: platform.platform_id,
-      type: 'AUTH',
-      user_id: null,
-    },
-  });
-  if (!platformCreds || !platformCreds.refresh_token) {
-    this.logger.warn('No valid Google platform credentials found');
-    throw new BadRequestException(
-      'Authentication required: No valid refresh token found. Please authenticate with Google.',
-    );
-  }
+    const platformCreds = await this.prisma.platformCredentials.findFirst({
+      where: {
+        platform_id: platform.platform_id,
+        type: 'AUTH',
+        user_id: null,
+      },
+    });
+    if (!platformCreds || !platformCreds.refresh_token) {
+      this.logger.warn('No valid Google platform credentials found');
+      throw new BadRequestException(
+        'Authentication required: No valid refresh token found. Please authenticate with Google.',
+      );
+    }
 
-  // Get stored Google credentials
-  const creds = await this.getGoogleCredentials();
+    // Get stored Google credentials
+    const creds = await this.getGoogleCredentials();
 
-  // Initialize Google Ads API client
-  const client = new GoogleAdsApi({
-    client_id: creds.clientId,
-    client_secret: creds.clientSecret,
-    developer_token: creds.developerToken,
-  });
+    // Initialize Google Ads API client
+    const client = new GoogleAdsApi({
+      client_id: creds.clientId,
+      client_secret: creds.clientSecret,
+      developer_token: creds.developerToken,
+    });
 
-  // Initialize customer with refresh token and customer ID
-  const customer = client.Customer({
-    customer_id: creds.customerAccountId,
-    refresh_token: platformCreds.refresh_token,
-  });
+    // Initialize customer with refresh token and customer ID
+    const customer = client.Customer({
+      customer_id: creds.customerAccountId,
+      refresh_token: platformCreds.refresh_token,
+    });
 
-  try {
-    // Fetch MCC info using GAQL query
-    const mccResponse = await customer.query(`
+    try {
+      // Fetch MCC info using GAQL query
+      const mccResponse = await customer.query(`
       SELECT 
         customer.id,
         customer.descriptive_name,
@@ -389,20 +401,20 @@ export class GoogleService {
       LIMIT 1
     `);
 
-    const mccResults: any[] = [];
-    for await (const row of mccResponse) {
-      mccResults.push(row);
-    }
+      const mccResults: any[] = [];
+      for await (const row of mccResponse) {
+        mccResults.push(row);
+      }
 
-    if (mccResults.length === 0) {
-      this.logger.error('No MCC account data returned from Google Ads API');
-      throw new BadRequestException('No MCC account data returned');
-    }
+      if (mccResults.length === 0) {
+        this.logger.error('No MCC account data returned from Google Ads API');
+        throw new BadRequestException('No MCC account data returned');
+      }
 
-    const mccData = mccResults[0].customer;
+      const mccData = mccResults[0].customer;
 
-    // Fetch client accounts using GAQL query
-    const clientResponse = await customer.query(`
+      // Fetch client accounts using GAQL query
+      const clientResponse = await customer.query(`
       SELECT 
         customer_client.client_customer,
         customer_client.level,
@@ -415,71 +427,78 @@ export class GoogleService {
       WHERE customer_client.level <= 1
     `);
 
-    const clientAccounts: any[] = [];
-    for await (const row of clientResponse) {
-      const client = row.customer_client;
-      // Only include non-manager accounts (i.e., client accounts, not the MCC itself)
-      if (client && !client.manager && client.level === 1) {
-        clientAccounts.push({
-          resourceName: client.resource_name,
-          clientCustomer: client.client_customer,
-          level: client.level?.toString(),
-          manager: client.manager,
-          descriptiveName: client.descriptive_name || null,
-          currencyCode: client.currency_code || null,
-          timeZone: client.time_zone || null,
-          id: client.id?.toString(),
-        });
+      const clientAccounts: any[] = [];
+      for await (const row of clientResponse) {
+        const client = row.customer_client;
+        // Only include non-manager accounts (i.e., client accounts, not the MCC itself)
+        if (client && !client.manager && client.level === 1) {
+          clientAccounts.push({
+            resourceName: client.resource_name,
+            clientCustomer: client.client_customer,
+            level: client.level?.toString(),
+            manager: client.manager,
+            descriptiveName: client.descriptive_name || null,
+            currencyCode: client.currency_code || null,
+            timeZone: client.time_zone || null,
+            id: client.id?.toString(),
+          });
+        }
       }
-    }
 
-    // Save or update MCC info and client accounts in GoogleAccount table
-    const mccId = mccData.id.toString().replace(/-/g, ''); // Normalize MCC ID (e.g., "1234567890")
-    await this.prisma.googleAccount.upsert({
-      where: {
-        orgId_mccId: {
-          orgId: org.id,
-          mccId,
+      // Save or update MCC info and client accounts in GoogleAccount table
+      const mccId = mccData.id.toString().replace(/-/g, ''); // Normalize MCC ID (e.g., "1234567890")
+      await this.prisma.googleAccount.upsert({
+        where: {
+          orgId_mccId: {
+            orgId: org.id,
+            mccId,
+          },
         },
-      },
-      create: {
-        orgId: org.id,
-        platformId: platform.platform_id,
-        mccId,
-        descriptiveName: mccData.descriptive_name || null,
-        currencyCode: mccData.currency_code || null,
-        timeZone: mccData.time_zone || null,
-        clientAccounts: clientAccounts.length > 0 ? clientAccounts : Prisma.JsonNull,
-      },
-      update: {
-        descriptiveName: mccData.descriptive_name || null,
-        currencyCode: mccData.currency_code || null,
-        timeZone: mccData.time_zone || null,
-        clientAccounts: clientAccounts.length > 0 ? clientAccounts : Prisma.JsonNull,
-        updatedAt: new Date(),
-      },
-    });
+        create: {
+          orgId: org.id,
+          platformId: platform.platform_id,
+          mccId,
+          descriptiveName: mccData.descriptive_name || null,
+          currencyCode: mccData.currency_code || null,
+          timeZone: mccData.time_zone || null,
+          clientAccounts:
+            clientAccounts.length > 0 ? clientAccounts : Prisma.JsonNull,
+        },
+        update: {
+          descriptiveName: mccData.descriptive_name || null,
+          currencyCode: mccData.currency_code || null,
+          timeZone: mccData.time_zone || null,
+          clientAccounts:
+            clientAccounts.length > 0 ? clientAccounts : Prisma.JsonNull,
+          updatedAt: new Date(),
+        },
+      });
 
-    this.logger.log(`MCC info and ${clientAccounts.length} client accounts saved successfully for MCC ID: ${mccId}`);
-    return {
-      message: 'MCC info and client accounts fetched and saved successfully',
-      mccInfo: {
-        mccId,
-        descriptiveName: mccData.descriptive_name,
-        currencyCode: mccData.currency_code,
-        timeZone: mccData.time_zone,
-        clientAccounts, 
-      },
-    };
-  } catch (error) {
-    this.logger.error('Failed to fetch or save MCC info or client accounts', error);
-    throw new InternalServerErrorException(
-      `Failed to fetch or save MCC info or client accounts: ${error.message || error}`,
-    );
+      this.logger.log(
+        `MCC info and ${clientAccounts.length} client accounts saved successfully for MCC ID: ${mccId}`,
+      );
+      return {
+        message: 'MCC info and client accounts fetched and saved successfully',
+        mccInfo: {
+          mccId,
+          descriptiveName: mccData.descriptive_name,
+          currencyCode: mccData.currency_code,
+          timeZone: mccData.time_zone,
+          clientAccounts,
+        },
+      };
+    } catch (error) {
+      this.logger.error(
+        'Failed to fetch or save MCC info or client accounts',
+        error,
+      );
+      throw new InternalServerErrorException(
+        `Failed to fetch or save MCC info or client accounts: ${error.message || error}`,
+      );
+    }
   }
-}
 
-async disconnectMCC(userId: string) {
+  async disconnectMCC(userId: string) {
     // Verify user existence and role
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
@@ -489,7 +508,9 @@ async disconnectMCC(userId: string) {
       throw new UnauthorizedException('User not found');
     }
     if (user.role !== 'ADMIN') {
-      this.logger.warn(`User ${userId} attempted to disconnect MCC without ADMIN role`);
+      this.logger.warn(
+        `User ${userId} attempted to disconnect MCC without ADMIN role`,
+      );
       throw new ForbiddenException('Only admins can disconnect MCC accounts');
     }
 
@@ -508,7 +529,9 @@ async disconnectMCC(userId: string) {
     });
     if (!platform) {
       this.logger.error('Google marketing platform not found');
-      throw new InternalServerErrorException('Google marketing platform not found');
+      throw new InternalServerErrorException(
+        'Google marketing platform not found',
+      );
     }
 
     // Get stored Google credentials to retrieve customerAccountId
@@ -535,8 +558,12 @@ async disconnectMCC(userId: string) {
         }),
       ]);
 
-      this.logger.log(`MCC account (ID: ${mccId}) and associated credentials disconnected successfully`);
-      return { message: 'MCC account and credentials disconnected successfully' };
+      this.logger.log(
+        `MCC account (ID: ${mccId}) and associated credentials disconnected successfully`,
+      );
+      return {
+        message: 'MCC account and credentials disconnected successfully',
+      };
     } catch (error) {
       this.logger.error('Failed to disconnect MCC account', error);
       throw new InternalServerErrorException(
@@ -554,7 +581,6 @@ async disconnectMCC(userId: string) {
       this.logger.error(`User with ID ${userId} not found`);
       throw new UnauthorizedException('User not found');
     }
-
 
     // Get organization
     const org = await this.prisma.organization.findUnique({
@@ -580,12 +606,14 @@ async disconnectMCC(userId: string) {
     });
 
     if (!mccAccount) {
-    this.logger.log(`No MCC account found for organization ${org.id} and MCC ID ${mccId}`);
-    return {
-      message: 'No MCC account found',
-      mccInfo: null,
-    };
-  }
+      this.logger.log(
+        `No MCC account found for organization ${org.id} and MCC ID ${mccId}`,
+      );
+      return {
+        message: 'No MCC account found',
+        mccInfo: null,
+      };
+    }
 
     this.logger.log(`MCC info retrieved successfully for MCC ID: ${mccId}`);
     return {
@@ -596,82 +624,92 @@ async disconnectMCC(userId: string) {
         descriptiveName: mccAccount.descriptiveName,
         currencyCode: mccAccount.currencyCode,
         timeZone: mccAccount.timeZone,
-        clientAccounts: mccAccount.clientAccounts
+        clientAccounts: mccAccount.clientAccounts,
       },
     };
   }
 
+  async getValidAccessToken(
+    clientId: string,
+    clientSecret: string,
+    refreshToken: string,
+    platformId: string,
+  ): Promise<string> {
+    this.logger.log(`Checking access token for platform_id=${platformId}`);
 
-async getValidAccessToken(
-  clientId: string,
-  clientSecret: string,
-  refreshToken: string,
-  platformId: string,
-): Promise<string> {
-  this.logger.log(`Checking access token for platform_id=${platformId}`);
-
-  // Fetch credentials
-  const platformCreds = await this.prisma.platformCredentials.findFirst({
-    where: {
-      type: 'AUTH',
-      platform_id: platformId,
-      user_id: null, // Explicitly match user_id: null
-    },
-  });
-
-  if (
-    platformCreds?.access_token &&
-    platformCreds?.expires_at &&
-    new Date(platformCreds.expires_at) > new Date()
-  ) {
-    this.logger.log(`Using existing valid access token: ${platformCreds.access_token.substring(0, 20)}...`);
-    return platformCreds.access_token;
-  }
-
-  this.logger.log('Access token missing or expired, refreshing...');
-
-  // Refresh the access token
-  try {
-    const response = await axios.post<{ access_token: string; expires_in: number }>(
-      'https://oauth2.googleapis.com/token',
-      qs.stringify({
-        client_id: clientId,
-        client_secret: clientSecret,
-        refresh_token: refreshToken,
-        grant_type: 'refresh_token',
-      }),
-      {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
+    // Fetch credentials
+    const platformCreds = await this.prisma.platformCredentials.findFirst({
+      where: {
+        type: 'AUTH',
+        platform_id: platformId,
+        user_id: null, // Explicitly match user_id: null
       },
-    );
+    });
 
-    const { access_token, expires_in } = response.data;
-    const expiresAt = new Date(Date.now() + expires_in * 1000);
-
-    this.logger.log(`Refreshed access token: ${access_token.substring(0, 20)}..., expires_at=${expiresAt.toISOString()}`);
-
-    // Update the database with new access token and expiration
-    if (!platformCreds) {
-      this.logger.error('Platform credentials not found for updating access token');
-      throw new InternalServerErrorException('Platform credentials not found');
+    if (
+      platformCreds?.access_token &&
+      platformCreds?.expires_at &&
+      new Date(platformCreds.expires_at) > new Date()
+    ) {
+      this.logger.log(
+        `Using existing valid access token: ${platformCreds.access_token.substring(0, 20)}...`,
+      );
+      return platformCreds.access_token;
     }
-    await this.prisma.platformCredentials.update({
-      where: { credential_id: platformCreds.credential_id },
-      data: {
-        access_token,
-        expires_at: expiresAt,
-      },
-    });
 
-    return access_token;
-  } catch (error: any) {
-    this.logger.error('Failed to refresh access token', {
-      error: error.message,
-      details: JSON.stringify(error.response?.data || {}),
-    });
-    throw new InternalServerErrorException('Failed to refresh access token');
+    this.logger.log('Access token missing or expired, refreshing...');
+
+    // Refresh the access token
+    try {
+      const response = await axios.post<{
+        access_token: string;
+        expires_in: number;
+      }>(
+        'https://oauth2.googleapis.com/token',
+        qs.stringify({
+          client_id: clientId,
+          client_secret: clientSecret,
+          refresh_token: refreshToken,
+          grant_type: 'refresh_token',
+        }),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        },
+      );
+
+      const { access_token, expires_in } = response.data;
+      const expiresAt = new Date(Date.now() + expires_in * 1000);
+
+      this.logger.log(
+        `Refreshed access token: ${access_token.substring(0, 20)}..., expires_at=${expiresAt.toISOString()}`,
+      );
+
+      // Update the database with new access token and expiration
+      if (!platformCreds) {
+        this.logger.error(
+          'Platform credentials not found for updating access token',
+        );
+        throw new InternalServerErrorException(
+          'Platform credentials not found',
+        );
+      }
+      await this.prisma.platformCredentials.update({
+        where: { credential_id: platformCreds.credential_id },
+        data: {
+          access_token,
+          expires_at: expiresAt,
+        },
+      });
+
+      return access_token;
+    } catch (error: any) {
+      this.logger.error('Failed to refresh access token', {
+        error: error.message,
+        details: JSON.stringify(error.response?.data || {}),
+      });
+      throw new InternalServerErrorException('Failed to refresh access token');
+    }
   }
-}
 }

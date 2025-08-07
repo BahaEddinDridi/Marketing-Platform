@@ -47,10 +47,29 @@ export class MetaController {
   }
 
   @Get('callback')
-  async handleAuthCallback(@Query('code') code: string) {
-    return this.metaService.handleAuthCode(code);
-  }
-
+async handleAuthCallback(@Query('code') code: string) {
+  // Process the authentication code as before
+  const result = await this.metaService.handleAuthCode(code);
+  
+  // Return an HTML response to close the popup
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Meta Authentication</title>
+    </head>
+    <body>
+      <p>Authentication successful. This window will close in a moment...</p>
+      <button onclick="window.close()">Close Window</button>
+      <script>
+        setTimeout(() => {
+          window.close();
+        }, 1500);
+      </script>
+    </body>
+    </html>
+  `;
+}
   @UseGuards(JwtAuthGuard)
   @Post('connect-bm')
   async connectBusinessManager(@Req() req: AuthenticatedRequest) {

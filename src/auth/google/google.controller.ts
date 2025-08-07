@@ -39,7 +39,24 @@ export class GoogleController {
 
   @Get('redirect')
   async handleAuthCallback(@Query('code') code: string) {
-    return this.googleService.handleAuthCode(code);
+    await this.googleService.handleAuthCode(code);
+    return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Google Authentication</title>
+    </head>
+    <body>
+      <p>Authentication successful. This window will close in a moment...</p>
+      <button onclick="window.close()">Close Window</button>
+      <script>
+        setTimeout(() => {
+          window.close();
+        }, 1500);
+      </script>
+    </body>
+    </html>
+  `;
   }
 
   @UseGuards(JwtAuthGuard)
