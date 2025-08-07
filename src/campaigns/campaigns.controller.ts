@@ -9,6 +9,7 @@ import {
   UseGuards,
   Req,
   Query,
+  Res,
 } from '@nestjs/common';
 import { CampaignsService, LinkedInCampaignInput } from './campaigns.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
@@ -16,7 +17,7 @@ import { UpdateCampaignDto } from './dto/update-campaign.dto';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
 import { CampaignStatus, ObjectiveType } from '@prisma/client';
 import { LinkedInCampaignsService } from './linkedin/linkedinCampaign.service';
-
+import { Response } from 'express';
 interface AuthenticatedRequest extends Request {
   user?: { user_id: string; email: string; orgId: string; role: string };
 }
@@ -312,5 +313,28 @@ findAll(
       message: result.message,
       data: result.data,
     };
+  }
+
+    @Get(':campaignId/report/pdf')
+  @UseGuards(JwtAuthGuard)
+  async downloadCampaignReport(
+    @Param('campaignId') campaignId: string,
+    @Res() res: Response,
+  ) {
+    try {
+      const pdfBuffer = await this.linkedinCampaignsService.createPdfReport(campaignId);
+      res.set({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename=campaign-report-${campaignId}.pdf`,
+        'Content-Length': pdfBuffer.length,
+      });
+      res.send(pdfBuffer);
+    } catch (error: any) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to generate PDF report',
+        error: error.message,
+      });
+    }
   }
 }

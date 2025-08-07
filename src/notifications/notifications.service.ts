@@ -1,10 +1,27 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { NotificationPreference } from '@prisma/client';
 import { NotificationsGateway } from 'src/middlewares/notifications.gateway';
 import { PrismaService } from 'src/prisma/prisma.service';
 
+// src/types/notification.interface.ts
+export interface Notification {
+  id: string;
+  userId: string;
+  title: string;
+  message: string;
+  type: string;
+  actionUrl?: string | null;
+  isCritical: boolean;
+  meta?: any; // Prisma Json type, can be refined if specific structure is known
+  seen: boolean;
+  createdAt: Date;
+  readAt?: Date | null;
+}
+
 @Injectable()
 export class NotificationsService {
+    private readonly logger = new Logger(NotificationsService.name);
+  
   constructor(
     private prisma: PrismaService,
     private socketGateway: NotificationsGateway,
@@ -34,6 +51,7 @@ export class NotificationsService {
       },
     });
 
+    this.logger.log("users", users)
     for (const user of users) {
       const notification = await this.prisma.notification.create({
         data: {
@@ -85,5 +103,56 @@ export class NotificationsService {
       where: { userId },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  async getUserNotificationDropdown(
+    userId: string,
+    options: {
+      seen?: boolean; // Filter by seen/unseen status
+      limit?: number; // Limit number of notifications
+      since?: Date; // Filter notifications since a specific date
+    } = {},
+  ): Promise<Notification[]> {
+    // Validate userId
+    const userExists = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+    });
+    if (!userExists) {
+      throw new NotFoundException('User not found');
+    }
+
+    // Build query conditions
+    const where: any = { userId };
+    if (options.seen !== undefined) {
+      where.seen = options.seen;
+    }
+    if (options.since) {
+      where.createdAt = { gte: options.since };
+    }
+
+    const notifications = await this.prisma.notification.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: options.limit ?? 50, // Default limit to 50
+      select: {
+        id: true,
+        userId: true,
+        title: true,
+        message: true,
+        type: true,
+        actionUrl: true,
+        isCritical: true,
+        meta: true,
+        seen: true,
+        createdAt: true,
+        readAt: true,
+      },
+    });
+
+    if (!notifications.length) {
+      throw new NotFoundException('No notifications found for this user');
+    }
+
+    return notifications;
   }
 }

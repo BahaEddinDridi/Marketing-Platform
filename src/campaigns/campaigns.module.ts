@@ -17,6 +17,7 @@ import { MetaCampaignService } from './meta/metaCampaign.service';
 import { MetaCampaignController } from './meta/metaCampaign.controller';
 import { MetaAdSetService } from './meta/metaAdSet.service';
 import { NotificationsModule } from 'src/notifications/notifications.module';
+import { GoogleAdsAIService } from './google/googleAd.service';
 
 @Module({
   imports: [PrismaModule, AuthModule, AnalyticsModule, NotificationsModule],
@@ -35,6 +36,7 @@ import { NotificationsModule } from 'src/notifications/notifications.module';
     GoogleCampaignsService,
     GoogleCampaignBudgetService,
     GoogleAdsService,
+    GoogleAdsAIService,
     MetaCampaignService,
     MetaAdSetService
   ],

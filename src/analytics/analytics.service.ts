@@ -192,7 +192,7 @@ export class AnalyticsService {
     });
 
     const total = leads.reduce((sum, item) => sum + item._count.lead_id, 0);
-
+this.logger.log("total leads", total, leads, trendData)
     return {
       total,
       bySource: leads.map((item) => ({

@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@azure/identity": "^4.8.0",
+    "@huggingface/inference": "^4.6.1",
     "@microsoft/microsoft-graph-client": "^3.0.7",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.1",
@@ -46,6 +47,7 @@
     "express-session": "^1.18.1",
     "form-data": "^4.0.3",
     "google-ads-api": "^20.0.1",
+    "groq-sdk": "^0.29.0",
     "long": "^5.3.2",
     "multer": "^1.4.5-lts.2",
     "node-schedule": "^2.1.1",
@@ -56,6 +58,7 @@
     "passport-jwt": "^4.0.1",
     "passport-linkedin-oauth2": "^2.0.0",
     "passport-microsoft": "^2.1.0",
+    "pdf-lib": "^1.17.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "socket.io": "^4.8.1",

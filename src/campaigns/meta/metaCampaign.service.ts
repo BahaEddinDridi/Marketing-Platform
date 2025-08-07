@@ -173,8 +173,8 @@ export class MetaCampaignService {
           {
             title: 'Meta Sync Successful',
             message: `Meta campaigns were successfully synced for your organization.`,
-            type: 'success',
-            meta: { orgId },
+            type: 'success: meta sync',
+            meta: { orgId, url: "http://localhost:3000/campaigns"},
           },
         );
         this.logger.log(`Sync completed for org ${orgId}`);

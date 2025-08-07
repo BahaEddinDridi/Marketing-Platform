@@ -566,8 +566,8 @@ export class GoogleCampaignsService {
           {
             title: 'Google Sync Successful',
             message: `Google campaigns were successfully synced for your organization.`,
-            type: 'success',
-            meta: { orgId },
+            type: 'success: google sync',
+            meta: { orgId, url: "http://localhost:3000/campaigns" },
           },
         );
         this.logger.log(`Sync completed for org ${orgId}`);

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -28,6 +29,7 @@ import {
 } from './googleAdGroup.service';
 import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
+import { GoogleAdsAIService } from './googleAd.service';
 
 @Controller('campaigns/google')
 export class GoogleCampaignController {
@@ -37,6 +39,8 @@ export class GoogleCampaignController {
     private readonly googleCampaignsService: GoogleCampaignsService,
     private readonly googleCampaignBudgetService: GoogleCampaignBudgetService,
     private readonly googleAdsService: GoogleAdsService,
+        private readonly googleAdsAIService: GoogleAdsAIService,
+
   ) {}
 
   @Get('/list')
@@ -393,6 +397,81 @@ export class GoogleCampaignController {
       );
       throw new InternalServerErrorException(
         `Failed to fetch image asset details: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+
+  @Get('/headlines/:campaignId')
+  @UseGuards(JwtAuthGuard)
+  async generateHeadlines(
+    @Param('campaignId') campaignId: string,
+    @Query('count') count: string = '5',
+    @Query('keywords') keywords?: string,
+    @Query('businessDescription') businessDescription?: string,
+    @Query('campaignType') campaignType?: 'SEARCH' | 'DISPLAY',
+  ) {
+    try {
+      const countNum = parseInt(count, 10);
+      if (isNaN(countNum) || countNum <= 0 || countNum > 15) {
+        throw new BadRequestException('Count must be a number between 1 and 15');
+      }
+
+      const keywordArray = keywords
+        ? keywords.split(',').map((k) => k.trim())
+        : undefined;
+
+      const headlines = await this.googleAdsAIService.generateHeadlines(
+        campaignId,
+        countNum,
+        {
+          keywords: keywordArray,
+          businessDescription,
+          campaignType,
+        },
+      );
+      return { success: true, headlines };
+    } catch (error: any) {
+      this.logger.error(`Failed to generate headlines: ${error.message}`);
+      throw new InternalServerErrorException(
+        `Failed to generate headlines: ${error.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  @Get('/descriptions/:campaignId')
+  @UseGuards(JwtAuthGuard)
+  async generateDescriptions(
+    @Param('campaignId') campaignId: string,
+    @Query('count') count: string = '5',
+    @Query('keywords') keywords?: string,
+    @Query('businessDescription') businessDescription?: string,
+    @Query('campaignType') campaignType?: 'SEARCH' | 'DISPLAY',
+  ) {
+    try {
+      const countNum = parseInt(count, 10);
+      if (isNaN(countNum) || countNum <= 0 || countNum > 10) {
+        throw new BadRequestException('Count must be a number between 1 and 10');
+      }
+
+      const keywordArray = keywords
+        ? keywords.split(',').map((k) => k.trim())
+        : undefined;
+
+      const descriptions = await this.googleAdsAIService.generateDescriptions(
+        campaignId,
+        countNum,
+        {
+          keywords: keywordArray,
+          businessDescription,
+          campaignType,
+        },
+      );
+      return { success: true, descriptions };
+    } catch (error: any) {
+      this.logger.error(`Failed to generate descriptions: ${error.message}`);
+      throw new InternalServerErrorException(
+        `Failed to generate descriptions: ${error.message || 'Unknown error'}`,
       );
     }
   }
