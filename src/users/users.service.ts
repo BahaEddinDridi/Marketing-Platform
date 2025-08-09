@@ -43,9 +43,9 @@ export class UsersService {
     updateData: UpdateUserDto,
     file?: Express.Multer.File,
   ) {
-     if (userId !== requesterId) {
-       throw new UnauthorizedException('You can only update your own profile');
-     }
+    if (userId !== requesterId) {
+      throw new UnauthorizedException('You can only update your own profile');
+    }
 
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
@@ -116,27 +116,26 @@ export class UsersService {
 
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
-      select: { 
+      select: {
         user_id: true,
-        password: true 
-      }
+        password: true,
+      },
     });
-  
+
     if (!user || !user.password)
       throw new UnauthorizedException('Invalid credentials');
-    
+
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       throw new UnauthorizedException('Incorrect password');
     }
-    
+
     await this.prisma.user.delete({
       where: { user_id: userId },
     });
 
     return { message: 'Account deleted successfully' };
   }
-
 
   async getProfileCompletionPercentage(userId: string): Promise<number> {
     const user = await this.prisma.user.findUnique({
@@ -190,26 +189,26 @@ export class UsersService {
       where: { user_id: requesterId },
       select: { role: true },
     });
-  
+
     if (!requester) {
       throw new UnauthorizedException('Requester not found');
     }
-  
+
     const isSelf = userId === requesterId;
     const isAdmin = requester.role === 'ADMIN';
-  
+
     if (!isSelf && !isAdmin) {
       throw new UnauthorizedException('Not authorized to update this setting');
     }
-  
+
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
-  
+
     if (!user) {
       throw new NotFoundException('User not found');
     }
-  
+
     const updatedUser = await this.prisma.user.update({
       where: { user_id: userId },
       data: {
@@ -217,11 +216,51 @@ export class UsersService {
         updated_at: new Date(),
       },
     });
-  
+
     return {
       user_id: updatedUser.user_id,
       allowPersonalEmailSync: updatedUser.allowPersonalEmailSync,
     };
   }
-  
+  async getNotificationPreferences(userId: string) {
+  const preferences = await this.prisma.notificationPreference.findUnique({
+    where: { userId },
+  });
+
+  if (!preferences) {
+    throw new NotFoundException('Notification preferences not found');
+  }
+
+  return preferences;
+}
+
+  async updateNotificationPreferences(
+    userId: string,
+    requesterId: string,
+    preferences: {
+      receiveNewLead?: boolean;
+      receiveCampaignLaunched?: boolean;
+      receiveCampaignPaused?: boolean;
+      receiveCampaignFailed?: boolean;
+      receivePerformanceAlert?: boolean;
+      receiveBudgetAlert?: boolean;
+      receiveSyncSuccess?: boolean;
+      receiveSyncFailure?: boolean;
+    },
+  ) {
+    if (userId !== requesterId) {
+      throw new UnauthorizedException(
+        'You can only update your own notification preferences',
+      );
+    }
+    const updatedPreferences = await this.prisma.notificationPreference.upsert({
+      where: { userId },
+      update: preferences,
+      create: {
+        userId,
+        ...preferences,
+      },
+    });
+    return updatedPreferences;
+  }
 }

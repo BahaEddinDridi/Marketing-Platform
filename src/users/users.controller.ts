@@ -10,6 +10,7 @@ import {
   UseGuards,
   UseInterceptors,
   UploadedFile,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
@@ -78,5 +79,44 @@ export class UsersController {
     const percentage =
       await this.userService.getProfileCompletionPercentage(userId);
     return { completionPercentage: percentage };
+  }
+  @Get(':id/notification-preferences')
+  @UseGuards(JwtAuthGuard)
+  async getNotificationPreferences(
+    @Param('id') id: string,
+    @Req() request: any,
+  ) {
+    const requesterId = request.user?.user_id;
+    if (id !== requesterId) {
+      throw new UnauthorizedException(
+        'You can only view your own notification preferences',
+      );
+    }
+    return this.userService.getNotificationPreferences(id);
+  }
+
+  @Patch(':id/notification-preferences')
+  @UseGuards(JwtAuthGuard)
+  async updateNotificationPreferences(
+    @Param('id') id: string,
+    @Req() request: any,
+    @Body()
+    preferences: {
+      receiveNewLead?: boolean;
+      receiveCampaignLaunched?: boolean;
+      receiveCampaignPaused?: boolean;
+      receiveCampaignFailed?: boolean;
+      receivePerformanceAlert?: boolean;
+      receiveBudgetAlert?: boolean;
+      receiveSyncSuccess?: boolean;
+      receiveSyncFailure?: boolean;
+    },
+  ) {
+    const requesterId = request.user?.user_id;
+    return this.userService.updateNotificationPreferences(
+      id,
+      requesterId,
+      preferences,
+    );
   }
 }
