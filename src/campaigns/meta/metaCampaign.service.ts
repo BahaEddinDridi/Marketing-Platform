@@ -734,158 +734,167 @@ export class MetaCampaignService {
   }
 
   async fetchAllCampaigns(filters: {
-    search?: string;
-    status?: string;
-    objective?: string;
-    startDateFrom?: Date;
-    startDateTo?: Date;
-    endDateFrom?: Date;
-    endDateTo?: Date;
-    minDailyBudget?: number;
-    maxDailyBudget?: number;
-    minLifetimeBudget?: number;
-    maxLifetimeBudget?: number;
-    page?: number;
-    limit?: number;
-    sortBy?: string;
-    sortOrder?: 'asc' | 'desc';
-  } = {}) {
-    this.logger.log('Fetching Meta campaigns from database with filters:', filters);
+  search?: string;
+  status?: string | string[];
+  objective?: string | string[];
+  startDateFrom?: Date;
+  startDateTo?: Date;
+  endDateFrom?: Date;
+  endDateTo?: Date;
+  minDailyBudget?: number;
+  maxDailyBudget?: number;
+  minLifetimeBudget?: number;
+  maxLifetimeBudget?: number;
+  page?: number;
+  limit?: number;
+  sortBy?: string;
+  sortOrder?: 'asc' | 'desc';
+} = {}) {
+  this.logger.log('Fetching Meta campaigns from database with filters:', filters);
 
-    try {
-      const where: any = {
-        ad_account_id: {
-          in:
-            (
-              await this.prisma.metaCampaignConfig.findUnique({
-                where: { orgId: 'single-org' },
-              })
-            )?.adAccountIds || [],
-        },
-      };
-
-      // Add filters if provided
-      if (filters.status) {
-        where.status = filters.status;
-      }
-
-      if (filters.search) {
-        where.OR = [
-          { campaign_name: { contains: filters.search, mode: 'insensitive' } },
-          { campaign_id: { contains: filters.search, mode: 'insensitive' } },
-        ];
-      }
-
-      if (filters.objective) {
-        where.objective = filters.objective;
-      }
-
-      // Date range filters
-      if (filters.startDateFrom || filters.startDateTo) {
-        where.start_time = {};
-        if (filters.startDateFrom) {
-          where.start_time.gte = filters.startDateFrom;
-        }
-        if (filters.startDateTo) {
-          where.start_time.lte = filters.startDateTo;
-        }
-      }
-
-      if (filters.endDateFrom || filters.endDateTo) {
-        where.end_time = {};
-        if (filters.endDateFrom) {
-          where.end_time.gte = filters.endDateFrom;
-        }
-        if (filters.endDateTo) {
-          where.end_time.lte = filters.endDateTo;
-        }
-      }
-
-      // Budget range filters
-      if (filters.minDailyBudget || filters.maxDailyBudget) {
-        where.daily_budget = {};
-        if (filters.minDailyBudget) {
-          where.daily_budget.gte = filters.minDailyBudget;
-        }
-        if (filters.maxDailyBudget) {
-          where.daily_budget.lte = filters.maxDailyBudget;
-        }
-      }
-
-      if (filters.minLifetimeBudget || filters.maxLifetimeBudget) {
-        where.lifetime_budget = {};
-        if (filters.minLifetimeBudget) {
-          where.lifetime_budget.gte = filters.minLifetimeBudget;
-        }
-        if (filters.maxLifetimeBudget) {
-          where.lifetime_budget.lte = filters.maxLifetimeBudget;
-        }
-      }
-
-      // Calculate pagination
-      const page = filters.page || 1;
-      const limit = filters.limit || 10;
-      const skip = (page - 1) * limit;
-
-      // Execute query with pagination and sorting
-      const [campaigns, total] = await Promise.all([
-        this.prisma.metaCampaign.findMany({
-          where,
-          select: {
-            campaign_id: true,
-            campaign_name: true,
-            ad_account_id: true,
-            platform_id: true,
-            objective: true,
-            bid_strategy: true,
-            buying_type: true,
-            status: true,
-            effective_status: true,
-            special_ad_categories: true,
-            daily_budget: true,
-            lifetime_budget: true,
-            spend_cap: true,
-            budget_remaining: true,
-            issues_info: true,
-            start_time: true,
-            end_time: true,
-            created_at: true,
-            updated_at: true,
-          },
-          skip,
-          take: limit,
-          orderBy: filters.sortBy ? {
-            [filters.sortBy]: filters.sortOrder || 'desc',
-          } : {
-            created_at: 'desc'
-          },
-        }),
-        this.prisma.metaCampaign.count({ where }),
-      ]);
-
-      this.logger.log(
-        `Fetched ${campaigns.length} Meta campaigns from database (total: ${total})`,
-      );
-
-      return {
-        data: campaigns,
-        pagination: {
-          total,
-          page,
-          limit,
-          totalPages: Math.ceil(total / limit),
-        },
-      };
-    } catch (error: any) {
-      this.logger.error(
-        `Failed to fetch Meta campaigns: ${error.message}`,
-        error.stack,
-      );
-      throw new InternalServerErrorException(
-        'Failed to fetch Meta campaigns from database',
-      );
+  try {
+    // Validate date ranges
+    if (filters.startDateFrom && filters.startDateTo && filters.startDateFrom > filters.startDateTo) {
+      throw new Error('startDateFrom must be before or equal to startDateTo');
     }
+    if (filters.endDateFrom && filters.endDateTo && filters.endDateFrom > filters.endDateTo) {
+      throw new Error('endDateFrom must be before or equal to endDateTo');
+    }
+
+    // Initialize where clause
+    const where: any = {};
+
+    // Add filters if provided
+    if (filters.status) {
+      where.status = Array.isArray(filters.status)
+        ? { in: filters.status }
+        : { in: [filters.status] };
+    }
+
+    if (filters.search) {
+      where.OR = [
+        { campaign_name: { contains: filters.search, mode: 'insensitive' } },
+        { campaign_id: { contains: filters.search, mode: 'insensitive' } },
+      ];
+    }
+
+    if (filters.objective) {
+      where.objective = Array.isArray(filters.objective)
+        ? { in: filters.objective }
+        : { in: [filters.objective] };
+    }
+
+    // Date range filters
+    if (filters.startDateFrom || filters.startDateTo) {
+      where.start_time = {};
+      if (filters.startDateFrom) {
+        where.start_time.gte = filters.startDateFrom;
+      }
+      if (filters.startDateTo) {
+        where.start_time.lte = filters.startDateTo;
+      }
+    }
+
+    if (filters.endDateFrom || filters.endDateTo) {
+      where.end_time = {};
+      if (filters.endDateFrom) {
+        where.end_time.gte = filters.endDateFrom;
+      }
+      if (filters.endDateTo) {
+        where.end_time.lte = filters.endDateTo;
+      }
+    }
+
+    // Budget range filters (convert dollars to cents)
+    if (filters.minDailyBudget || filters.maxDailyBudget) {
+      where.daily_budget = {};
+      if (filters.minDailyBudget) {
+        where.daily_budget.gte = Math.round(filters.minDailyBudget * 100);
+      }
+      if (filters.maxDailyBudget) {
+        where.daily_budget.lte = Math.round(filters.maxDailyBudget * 100);
+      }
+    }
+
+    if (filters.minLifetimeBudget || filters.maxLifetimeBudget) {
+      where.lifetime_budget = {};
+      if (filters.minLifetimeBudget) {
+        where.lifetime_budget.gte = Math.round(filters.minLifetimeBudget * 100);
+      }
+      if (filters.maxLifetimeBudget) {
+        where.lifetime_budget.lte = Math.round(filters.maxLifetimeBudget * 100);
+      }
+    }
+
+    // Validate and calculate pagination
+    const page = Math.max(1, filters.page || 1);
+    const limit = Math.max(1, Math.min(100, filters.limit || 10)); // Cap limit to prevent abuse
+    const skip = (page - 1) * limit;
+
+    // Validate sortBy
+    const validSortFields = [
+      'created_at',
+      'campaign_name',
+      'daily_budget',
+      'lifetime_budget',
+      'start_time',
+      'end_time',
+    ];
+    const sortBy = validSortFields.includes(filters.sortBy || '') ? filters.sortBy : 'created_at';
+    const sortOrder = filters.sortOrder || 'desc';
+
+    // Execute query with pagination and sorting
+    const [campaigns, total] = await Promise.all([
+      this.prisma.metaCampaign.findMany({
+        where,
+        select: {
+          campaign_id: true,
+          campaign_name: true,
+          ad_account_id: true,
+          platform_id: true,
+          objective: true,
+          bid_strategy: true,
+          buying_type: true,
+          status: true,
+          effective_status: true,
+          special_ad_categories: true,
+          daily_budget: true,
+          lifetime_budget: true,
+          spend_cap: true,
+          budget_remaining: true,
+          issues_info: true,
+          start_time: true,
+          end_time: true,
+          created_at: true,
+          updated_at: true,
+        },
+        skip,
+        take: limit,
+        orderBy: {
+          [sortBy as string]: sortOrder,
+        },
+      }),
+      this.prisma.metaCampaign.count({ where }),
+    ]);
+
+    this.logger.log(
+      `Fetched ${campaigns.length} Meta campaigns from database (total: ${total})`,
+    );
+
+    return {
+      data: campaigns,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  } catch (error: any) {
+    this.logger.error(`Failed to fetch Meta campaigns: ${error.message}`, error.stack);
+    throw new Error(`Failed to fetch Meta campaigns: ${error.message}`);
   }
+}
 
   async fetchAdSetsWithAds(campaignId: string) {
     this.logger.log(`Fetching ad sets with ads for campaign: ${campaignId}`);

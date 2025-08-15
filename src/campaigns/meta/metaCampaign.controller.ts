@@ -9,6 +9,7 @@ import {
   Patch,
   InternalServerErrorException,
   Query,
+  ParseArrayPipe,
 } from '@nestjs/common';
 import { MetaCampaignInput, MetaCampaignService } from './metaCampaign.service';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
@@ -25,10 +26,8 @@ export class MetaCampaignController {
   @UseGuards(JwtAuthGuard)
   async listMetaCampaigns(
     @Query('search') search?: string,
-    @Query('status') status?: string,
-    @Query('objective') objective?: string,
-    @Query('buyingType') buyingType?: string,
-    @Query('bidStrategy') bidStrategy?: string,
+    @Query('status', new ParseArrayPipe({ items: String, optional: true, separator: ',' })) status?: string[],
+    @Query('objective', new ParseArrayPipe({ items: String, optional: true, separator: ',' })) objective?: string[],
     @Query('startDateFrom') startDateFrom?: string,
     @Query('startDateTo') startDateTo?: string,
     @Query('endDateFrom') endDateFrom?: string,
@@ -44,8 +43,8 @@ export class MetaCampaignController {
   ) {
     return this.metaCampaignService.fetchAllCampaigns({
       search,
-      status,
-      objective,
+      status: status && status.length > 0 ? status : undefined,
+      objective: objective && objective.length > 0 ? objective : undefined,
       startDateFrom: startDateFrom ? new Date(startDateFrom) : undefined,
       startDateTo: startDateTo ? new Date(startDateTo) : undefined,
       endDateFrom: endDateFrom ? new Date(endDateFrom) : undefined,
