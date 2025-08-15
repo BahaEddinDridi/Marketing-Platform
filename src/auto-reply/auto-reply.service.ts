@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import * as schedule from 'node-schedule';
 import { LeadStatus } from '@prisma/client';
+import { LeadService } from 'src/lead/lead.service';
 
 interface GraphReplyDraft {
   id: string;
@@ -24,6 +25,15 @@ interface EmailTemplate {
   subject: string;
   body: string;
   isActive: boolean;
+}
+
+interface Lead {
+  lead_id: string;
+  email: string | null;
+  name: string | null;
+  company: string | null;
+  conversations: { emails: { emailId: string; conversationId: string; isIncoming: boolean }[] }[];
+  assignedTo?: { email: string } | null;
 }
 
 @Injectable()
@@ -48,6 +58,7 @@ export class AutoReplyService {
     private readonly prisma: PrismaService,
     private readonly authService: AuthService,
     private readonly configService: ConfigService,
+    private readonly leadService: LeadService,
   ) {
     this.startDynamicAutoReply();
   }
@@ -56,9 +67,8 @@ export class AutoReplyService {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private async getMicrosoftToken(orgId: string) {
+  private async getMicrosoftToken(orgId: string): Promise<string> {
     this.logger.log(`Fetching Microsoft app token for org ${orgId}`);
-
     let clientId = this.configService.get('CLIENT_ID');
     let clientSecret = this.configService.get('CLIENT_SECRET');
     let tenantId = this.configService.get('TENANT_ID');
@@ -71,13 +81,11 @@ export class AutoReplyService {
         tenantId = entraCreds.tenantId;
         this.logger.log(`Using Entra credentials for org ${orgId}`);
       } else {
-        this.logger.warn(
-          `No Entra credentials found for org ${orgId}, falling back to .env`,
-        );
+        this.logger.warn(`No Entra credentials found for org ${orgId}, falling back to .env`);
       }
 
       if (!clientId || !clientSecret || !tenantId) {
-        throw new Error('Missing Entra ID credentials');
+        throw new HttpException('Missing Entra ID credentials', HttpStatus.INTERNAL_SERVER_ERROR);
       }
 
       const response = await axios.post<{
@@ -97,20 +105,12 @@ export class AutoReplyService {
       );
 
       const { access_token, expires_in } = response.data;
-
-      await this.updateMicrosoftCredentials(
-        orgId,
-        access_token,
-        expires_in,
-        ['Mail.Read', 'Mail.Send', 'User.Read.All'],
-        'LEADS',
-      );
-
+      await this.updateMicrosoftCredentials(orgId, access_token, expires_in, this.scopes, 'LEADS');
       this.logger.log(`App token acquired for org ${orgId}`);
       return access_token;
     } catch (error) {
       this.logger.error(`Failed to get app token: ${error.message}`);
-      throw new Error('Failed to acquire application token');
+      throw new HttpException('Failed to acquire application token', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -121,66 +121,39 @@ export class AutoReplyService {
     scopes: string[],
     type: 'LEADS',
   ) {
-    this.logger.log(
-      `Updating Microsoft credentials for org ${orgId}, type: ${type}`,
-    );
-
+    this.logger.log(`Updating Microsoft credentials for org ${orgId}, type: ${type}`);
     const platform = await this.prisma.marketingPlatform.upsert({
-      where: {
-        orgId_platform_name: {
-          orgId,
-          platform_name: this.platformName,
-        },
-      },
-      create: {
-        orgId,
-        platform_name: this.platformName,
-        sync_status: 'CONNECTED',
-      },
-      update: {
-        sync_status: 'CONNECTED',
-      },
+      where: { orgId_platform_name: { orgId, platform_name: this.platformName } },
+      create: { orgId, platform_name: this.platformName, sync_status: 'CONNECTED' },
+      update: { sync_status: 'CONNECTED' },
     });
 
-    const existingCredentials = await this.prisma.platformCredentials.findFirst(
-      {
-        where: {
-          platform_id: platform.platform_id,
-          user_id: null,
-          type,
-        },
-      },
-    );
+    const existingCredentials = await this.prisma.platformCredentials.findFirst({
+      where: { platform_id: platform.platform_id, user_id: null, type },
+    });
+
+    const credentialData = {
+      platform_id: platform.platform_id,
+      user_id: null,
+      type,
+      access_token: accessToken,
+      refresh_token: null,
+      scopes,
+      expires_at: new Date(Date.now() + expiresIn * 1000),
+    };
 
     if (existingCredentials) {
       await this.prisma.platformCredentials.update({
         where: { credential_id: existingCredentials.credential_id },
-        data: {
-          access_token: accessToken,
-          refresh_token: null,
-          scopes,
-          expires_at: new Date(Date.now() + expiresIn * 1000),
-        },
+        data: credentialData,
       });
     } else {
-      await this.prisma.platformCredentials.create({
-        data: {
-          platform_id: platform.platform_id,
-          user_id: null,
-          type,
-          access_token: accessToken,
-          refresh_token: null,
-          scopes,
-          expires_at: new Date(Date.now() + expiresIn * 1000),
-        },
-      });
+      await this.prisma.platformCredentials.create({ data: credentialData });
     }
-
     this.logger.log(`Credentials updated for org ${orgId}, type: ${type}`);
   }
 
-  // Fetch platform credentials (same as LeadService)
-  private async getPlatformCredentials(orgId: string) {
+  private async getPlatformCredentials(orgId: string): Promise<{ creds?: any; needsAuth: boolean; token?: string }> {
     const platform = await this.prisma.marketingPlatform.findFirst({
       where: { orgId, platform_name: this.platformName },
     });
@@ -190,32 +163,22 @@ export class AutoReplyService {
     }
 
     const creds = await this.prisma.platformCredentials.findFirst({
-      where: {
-        platform_id: platform.platform_id,
-        user_id: null,
-        type: 'LEADS',
-      },
+      where: { platform_id: platform.platform_id, user_id: null, type: 'LEADS' },
     });
 
     if (!creds) {
       return { needsAuth: true };
     }
 
-    // Check if token is still valid
-    const isExpired =
-      creds.expires_at && new Date(creds.expires_at) < new Date();
+    const isExpired = creds.expires_at && new Date(creds.expires_at) < new Date();
     if (!isExpired && creds.access_token) {
-      return { creds, needsAuth: false };
+      return { creds, needsAuth: false, token: creds.access_token };
     }
 
     return { creds, needsAuth: true };
   }
 
-  // Personalize email template
-  private personalizeTemplate(
-    template: EmailTemplate,
-    lead: any,
-  ): { subject: string; body: string } {
+  private personalizeTemplate(template: EmailTemplate, lead: Lead): { subject: string; body: string } {
     const replacements = {
       '{{lead.name}}': lead.name || 'Customer',
       '{{lead.email}}': lead.email || '',
@@ -230,288 +193,401 @@ export class AutoReplyService {
     return { subject, body };
   }
 
-  // Send auto-reply email via Microsoft Graph
-  private async sendAutoReply(
+  
+ private async upsertConversationEmails(
     orgId: string,
-    lead: any,
-    template: EmailTemplate,
-    mailbox: string,
+    leadId: string,
     conversationId: string,
-    originalMessageId: string,
+    mailboxEmail: string,
     token: string,
-  ): Promise<void> {
+  ) {
     try {
-      if (!originalMessageId) {
-        this.logger.error(
-          `No valid originalMessageId for lead ${lead.lead_id}`,
-        );
-        throw new HttpException(
-          'Invalid original message ID',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-      if (!conversationId) {
-        this.logger.error(`No valid conversationId for lead ${lead.lead_id}`);
-        throw new HttpException(
-          'Invalid conversation ID',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-      const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-      if (!emailRegex.test(lead.email)) {
-        this.logger.warn(`Invalid lead email ${lead.email} for lead ${lead.lead_id}`);
-        // Fetch the original sender email from the conversation
-        const conversation = await this.prisma.leadConversation.findFirst({
-          where: { conversationId, leadId: lead.lead_id },
-          include: { emails: { where: { isIncoming: true }, take: 1 } },
+      const emails = await this.leadService.fetchConversationThread(orgId, mailboxEmail, conversationId, token);
+      let conversation = await this.prisma.leadConversation.findFirst({
+        where: { conversationId, leadId },
+      });
+
+      if (!conversation) {
+        this.logger.warn(`No conversation found for lead ${leadId}, creating new one`);
+        conversation = await this.prisma.leadConversation.create({
+          data: {
+            lead: { connect: { lead_id: leadId } },
+            conversationId,
+          },
         });
-        // Assert from as an object with email property
-        const from = conversation?.emails[0]?.from as { email: string } | undefined;
-        lead.email = from?.email || mailbox;
-        this.logger.log(`Falling back to sender email ${lead.email} for lead ${lead.lead_id}`);
       }
 
-      this.logger.log(
-        `Sending reply to message ID ${originalMessageId} for ${lead.email}`,
-      );
-      const { body } = this.personalizeTemplate(template, lead);
-      const response = await axios.post(
+      for (const email of emails) {
+        // Check if email already exists
+        const existingEmail = await this.prisma.conversationEmail.findUnique({
+          where: { emailId: email.id },
+        });
+        if (existingEmail) continue;
+
+        // Check for pending email with matching details
+        const pendingEmail = await this.prisma.conversationEmail.findFirst({
+          where: {
+            conversationId,
+            emailId: { startsWith: 'pending-' },
+            from: { equals: { name: email.from?.emailAddress?.name || null, email: email.from?.emailAddress?.address || 'unknown' } },
+            to: { equals: email.toRecipients?.map((r) => ({ name: r.emailAddress?.name || null, email: r.emailAddress?.address || 'unknown' })) || [] },
+            subject: email.subject || 'No Subject',
+            body: email.body?.content || email.bodyPreview || '',
+          },
+        });
+
+        if (pendingEmail) {
+          // Update pending email with actual emailId
+          await this.prisma.conversationEmail.update({
+            where: { id: pendingEmail.id },
+            data: {
+              emailId: email.id,
+              contentType: email.body?.contentType || 'text',
+              hasAttachments: email.hasAttachments || false,
+              receivedDateTime: new Date(email.receivedDateTime),
+              isIncoming: email.from?.emailAddress?.address.toLowerCase() !== mailboxEmail.toLowerCase(),
+              isThreadHead: emails[0]?.id === email.id,
+              inReplyTo: email.internetMessageId || null,
+            },
+          });
+          this.logger.log(`Updated pending email ${pendingEmail.emailId} to ${email.id} for conversation ${conversationId}`);
+          continue;
+        }
+
+        // Create new email if no pending match
+        const isIncoming = email.from?.emailAddress?.address.toLowerCase() !== mailboxEmail.toLowerCase();
+        await this.prisma.conversationEmail.create({
+          data: {
+            conversation: { connect: { id: conversation.id } },
+            emailId: email.id,
+            subject: email.subject || 'No Subject',
+            body: email.body?.content || email.bodyPreview || '',
+            contentType: email.body?.contentType || 'text',
+            from: {
+              name: email.from?.emailAddress?.name || null,
+              email: email.from?.emailAddress?.address || 'unknown',
+            },
+            to: email.toRecipients?.map((r) => ({
+              name: r.emailAddress?.name || null,
+              email: r.emailAddress?.address || 'unknown',
+            })) || [],
+            cc: email.ccRecipients?.map((r) => ({
+              name: r.emailAddress?.name || null,
+              email: r.emailAddress?.address || 'unknown',
+            })) || [],
+            bcc: email.bccRecipients?.map((r) => ({
+              name: r.emailAddress?.name || null,
+              email: r.emailAddress?.address || 'unknown',
+            })) || [],
+            hasAttachments: email.hasAttachments || false,
+            receivedDateTime: new Date(email.receivedDateTime),
+            isIncoming,
+            isThreadHead: emails[0]?.id === email.id,
+            inReplyTo: email.internetMessageId || null,
+          },
+        });
+      }
+      this.logger.log(`Upserted ${emails.length} emails for conversation ${conversationId}`);
+    } catch (error) {
+      this.logger.error(`Failed to upsert conversation emails for ${conversationId}: ${error.message}`);
+    }
+  }
+
+async sendAutoReply(
+  orgId: string,
+  lead: Lead,
+  template: EmailTemplate,
+  mailbox: string, // Ignored, use admin mailbox
+  conversationId: string,
+  originalMessageId: string,
+  token: string,
+): Promise<string | null> {
+  try {
+    // Use admin mailbox always
+    const adminUser = await this.prisma.user.findFirst({
+      where: { orgId, role: 'ADMIN' },
+      select: { email: true },
+    });
+    mailbox = adminUser?.email || mailbox;
+
+    if (!originalMessageId || !conversationId) {
+      this.logger.error(`Invalid message or conversation ID for lead ${lead.lead_id}`);
+      return null;
+    }
+
+    // Validate originalMessageId exists
+    const originalEmail = await this.prisma.conversationEmail.findFirst({
+      where: { emailId: originalMessageId, conversation: { conversationId } },
+    });
+    if (!originalEmail) {
+      this.logger.error(`Original message ${originalMessageId} not found for conversation ${conversationId}`);
+      return null;
+    }
+
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!emailRegex.test(mailbox) || mailbox.includes('gmail.com')) {
+      this.logger.error(`Invalid mailbox ${mailbox} for lead ${lead.lead_id}`);
+      return null;
+    }
+
+    let leadEmail = lead.email;
+    if (!leadEmail || !emailRegex.test(leadEmail)) {
+      const conversation = await this.prisma.leadConversation.findFirst({
+        where: { conversationId, leadId: lead.lead_id },
+        include: { emails: { where: { isIncoming: true }, take: 1 } },
+      });
+      leadEmail = (conversation?.emails[0]?.from as { email: string } | undefined)?.email || mailbox;
+      this.logger.log(`Falling back to sender email ${leadEmail} for lead ${lead.lead_id}`);
+    }
+
+    const { subject, body } = this.personalizeTemplate(template, { ...lead, email: leadEmail });
+    if (!body.trim() || !subject.trim()) {
+      this.logger.error(`Empty template body/subject for lead ${lead.lead_id}`);
+      return null;
+    }
+
+    // Save auto-reply attempt to DB immediately
+    let conversation = await this.prisma.leadConversation.findFirst({
+      where: { conversationId, leadId: lead.lead_id },
+    });
+    if (!conversation) {
+      conversation = await this.prisma.leadConversation.create({
+        data: {
+          lead: { connect: { lead_id: lead.lead_id } },
+          conversationId,
+        },
+      });
+    }
+
+    const pendingEmailId = `pending-${conversationId}-${Date.now()}`;
+    await this.prisma.conversationEmail.create({
+      data: {
+        conversation: { connect: { id: conversation.id } },
+        emailId: pendingEmailId,
+        subject,
+        body,
+        contentType: 'Text',
+        from: { name: null, email: mailbox },
+        to: [{ name: null, email: leadEmail }],
+        cc: [],
+        bcc: [],
+        hasAttachments: false,
+        receivedDateTime: new Date(),
+        isIncoming: false,
+        isThreadHead: false,
+        inReplyTo: originalMessageId,
+      },
+    });
+
+    let emailId: string | null = null;
+    this.logger.log(`Sending auto-reply to ${leadEmail} from ${mailbox} for conversation ${conversationId}`);
+
+    try {
+      await axios.post(
         `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages/${originalMessageId}/reply`,
         {
           message: {
-            body: {
-              contentType: 'Text',
-              content: body,
-            },
-            toRecipients: [{ emailAddress: { address: lead.email } }],
+            subject,
+            body: { contentType: 'Text', content: body },
+            toRecipients: [{ emailAddress: { address: leadEmail } }],
             conversationId,
           },
         },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      await this.delay(3000);
+      const sentItems = await axios.get(
+        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/sentitems/messages`,
         {
           headers: { Authorization: `Bearer ${token}` },
+          params: { $top: 10, $orderby: 'createdDateTime desc' },
         },
       );
-      this.logger.log(
-        `Auto-reply sent as reply to ${lead.email} for lead ${lead.lead_id}`,
-        JSON.stringify(
-          { status: response.status, data: response.data },
-          null,
-          2,
-        ),
-      );
+      const sentItemsData = sentItems.data as { value: { id?: string; createdDateTime?: string; conversationId?: string }[] };
+      emailId = sentItemsData.value.find((item) => item.conversationId === conversationId)?.id || null;
+      this.logger.log(`Reply sent for lead ${lead.lead_id}, emailId: ${emailId || 'none'}`);
     } catch (error) {
-      this.logger.error(
-        `Failed to send auto-reply to ${lead.email}: ${error.message}`,
-        JSON.stringify(error.response?.data, null, 2),
-      );
-      // Fallback to sendMail with inReplyTo
+      this.logger.error(`Reply error for lead ${lead.lead_id}: ${JSON.stringify(error.response?.data || error.message)}`);
+      if (error.response?.status === 429) {
+        await this.delay(2000);
+        return this.sendAutoReply(orgId, lead, template, mailbox, conversationId, originalMessageId, token);
+      }
+      this.logger.log(`Falling back to sendMail for lead ${lead.lead_id}`);
       try {
-        const { body } = this.personalizeTemplate(template, lead);
-        const fallbackResponse = await axios.post(
+        await axios.post(
           `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/sendMail`,
           {
             message: {
-              body: {
-                contentType: 'Text',
-                content: body,
-              },
-              toRecipients: [{ emailAddress: { address: lead.email } }],
+              subject,
+              body: { contentType: 'Text', content: body },
+              toRecipients: [{ emailAddress: { address: leadEmail } }],
               conversationId,
               inReplyTo: { id: originalMessageId },
             },
             saveToSentItems: true,
           },
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        await this.delay(3000);
+        const sentItems = await axios.get(
+          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/sentitems/messages`,
           {
             headers: { Authorization: `Bearer ${token}` },
+            params: { $top: 10, $orderby: 'createdDateTime desc' },
           },
         );
-        this.logger.log(
-          `Fallback auto-reply sent to ${lead.email} for lead ${lead.lead_id}`,
-          JSON.stringify(
-            { status: fallbackResponse.status, data: fallbackResponse.data },
-            null,
-            2,
-          ),
-        );
+        const sentItemsData = sentItems.data as { value: { id?: string; createdDateTime?: string; conversationId?: string }[] };
+        emailId = sentItemsData.value.find((item) => item.conversationId === conversationId)?.id || null;
+        this.logger.log(`Fallback sendMail sent for lead ${lead.lead_id}, emailId: ${emailId || 'none'}`);
       } catch (fallbackError) {
-        this.logger.error(
-          `Fallback sendMail failed for ${lead.email}: ${fallbackError.message}`,
-          JSON.stringify(fallbackError.response?.data, null, 2),
-        );
-        throw fallbackError;
+        this.logger.error(`Fallback failed for lead ${lead.lead_id}: ${JSON.stringify(fallbackError.response?.data || fallbackError.message)}`);
       }
     }
+
+    // Update emailId if found
+    if (emailId) {
+      await this.prisma.conversationEmail.update({
+        where: { emailId: pendingEmailId },
+        data: { emailId },
+      });
+    }
+
+    // Fetch and upsert full conversation
+    await this.upsertConversationEmails(orgId, lead.lead_id, conversationId, mailbox, token);
+
+    return emailId || pendingEmailId;
+  } catch (error) {
+    this.logger.error(`Overall error in sendAutoReply for lead ${lead.lead_id}: ${error.message}`);
+    return null;
+  }
+}
+
+  private async fetchConfig(configId: string) {
+    return this.prisma.autoReplyConfig.findUnique({
+      where: { id: configId },
+      include: { template: true, organization: { select: { sharedMailbox: true } } },
+    });
   }
 
-  // Process auto-replies for eligible leads
-  async processAutoReplies(orgId: string, configId: string) {
-    this.logger.log(
-      `Processing auto-replies for org ${orgId}, config ${configId}`,
-    );
-
-    try {
-      const config = await this.prisma.autoReplyConfig.findUnique({
-        where: { id: configId },
-        include: {
-          template: true,
-          organization: { select: { sharedMailbox: true } },
+  private async fetchLeadsAndConfig(orgId: string) {
+    const leadConfig = await this.prisma.leadConfiguration.findUnique({
+      where: { orgId },
+      select: { specialEmails: true, excludedEmails: true },
+    });
+    const leads = await this.prisma.lead.findMany({
+      where: {
+        orgId,
+        status: LeadStatus.NEW,
+        conversations: { some: { emails: { every: { isIncoming: true } } } },
+      },
+      include: {
+        conversations: {
+          include: { emails: { select: { id: true, isIncoming: true, emailId: true, conversationId: true, inReplyTo: true } } },
         },
-      });
-      this.logger.log(`Auto-reply config: ${JSON.stringify(config)}`);
-      if (!config || !config.isActive) {
-        this.logger.log(`Auto-reply config ${configId} is inactive or invalid`);
-        return;
-      }
+        assignedTo: { select: { email: true } },
+      },
+    });
+    return {
+      leads,
+      specialEmails: (leadConfig?.specialEmails || []).map((e) => e.toLowerCase()),
+      excludedEmails: (leadConfig?.excludedEmails || []).map((e) => e.toLowerCase()),
+    };
+  }
 
-      if (config.triggerType !== 'NEW_LEAD_ONE_EMAIL') {
-        this.logger.log(`Unsupported trigger type: ${config.triggerType}`);
-        return;
-      }
+  private shouldSkipLead(lead: Lead, specialEmails: string[], excludedEmails: string[]): boolean {
+    const leadEmail = lead.email?.toLowerCase();
+    return typeof leadEmail === 'string' && (specialEmails.includes(leadEmail) || excludedEmails.includes(leadEmail));
+  }
 
-      // Validate credentials
-      const credResult = await this.getPlatformCredentials(orgId);
-      if (credResult.needsAuth && !credResult.creds?.access_token) {
-        this.logger.warn(`Org ${orgId} needs credentials for auto-reply`);
-        return;
-      }
+  private hasExistingReply(lead: Lead): boolean {
+    return lead.conversations.some((conv) => conv.emails.some((email) => !email.isIncoming));
+  }
 
-      let token: string;
-      if (!credResult.needsAuth && credResult.creds?.access_token) {
-        token = credResult.creds.access_token;
-      } else {
-        token = await this.getMicrosoftToken(orgId);
-      }
+ async processAutoReplies(orgId: string, configId: string) {
+  this.logger.log(`Processing auto-replies for org ${orgId}, config ${configId}`);
+  try {
+    const config = await this.fetchConfig(configId);
+    if (!config || !config.isActive) {
+      this.logger.log(`Auto-reply config ${configId} is inactive or invalid`);
+      return;
+    }
+    if (config.triggerType !== 'NEW_LEAD_ONE_EMAIL') {
+      this.logger.log(`Unsupported trigger type: ${config.triggerType}`);
+      return;
+    }
 
-      const leadConfig = await this.prisma.leadConfiguration.findUnique({
-        where: { orgId },
-        select: { specialEmails: true, excludedEmails: true },
-      });
-      const specialEmails = (leadConfig?.specialEmails || []).map((email) =>
-        email.toLowerCase(),
-      );
-      const excludedEmails = (leadConfig?.excludedEmails || []).map((email) =>
-        email.toLowerCase(),
-      );
+    const credResult = await this.getPlatformCredentials(orgId);
+    let token: string;
+    if (!credResult.needsAuth && credResult.token) {
+      token = credResult.token;
+    } else {
+      token = await this.getMicrosoftToken(orgId);
+    }
 
-      // Fetch leads with status NEW and exactly one incoming email
-      const leads = await this.prisma.lead.findMany({
-        where: {
-          orgId,
-          status: LeadStatus.NEW,
-          conversations: { some: { emails: { every: { isIncoming: true } } } },
-        },
-        include: {
-          conversations: {
-            include: {
-              emails: {
-                select: {
-                  id: true,
-                  isIncoming: true,
-                  emailId: true,
-                  conversationId: true,
-                  inReplyTo: true,
-                },
-              },
-            },
-          },
-          assignedTo: { select: { email: true } },
-        },
-      });
+    const { leads, specialEmails, excludedEmails } = await this.fetchLeadsAndConfig(orgId);
 
-      for (const lead of leads) {
-        const leadEmail = lead.email?.toLowerCase();
-        if (
-          leadEmail &&
-          (specialEmails.includes(leadEmail) ||
-            excludedEmails.includes(leadEmail))
-        ) {
-          this.logger.log(
-            `Skipping auto-reply for lead ${lead.lead_id} with email ${lead.email} (in specialEmails or excludedEmails)`,
-          );
+    // Changed: Fetch admin mailbox once
+    const adminUser = await this.prisma.user.findFirst({
+      where: { orgId, role: 'ADMIN' },
+      select: { email: true },
+    });
+    const adminMailbox = adminUser?.email || config.organization.sharedMailbox;
+    if (!adminMailbox) {
+      this.logger.warn(`No admin mailbox found for org ${orgId}, skipping all auto-replies`);
+      return;
+    }
+
+    for (const lead of leads) {
+      try {
+        if (this.shouldSkipLead(lead, specialEmails, excludedEmails)) {
+          this.logger.log(`Skipping auto-reply for lead ${lead.lead_id} with email ${lead.email}`);
           continue;
         }
 
         const conversation = lead.conversations.find(
           (conv) => conv.emails.length === 1 && conv.emails[0].isIncoming,
         );
-
         if (!conversation) {
-          this.logger.log(
-            `Lead ${lead.lead_id} has no valid single-email conversation`,
-          );
+          this.logger.log(`Lead ${lead.lead_id} has no valid single-email conversation`);
           continue;
         }
 
-        // Check for existing replies to prevent duplicates
-        const hasReply = lead.conversations.some((conv) =>
-          conv.emails.some((email) => !email.isIncoming),
-        );
-        if (hasReply) {
+        if (this.hasExistingReply(lead)) {
           this.logger.log(`Lead ${lead.lead_id} already has a reply`);
           continue;
         }
 
-        let mailbox: string | null = null;
-        if (config.mailbox) {
-          mailbox = lead.assignedTo?.email || config.organization.sharedMailbox;
-          if (!mailbox) {
-            this.logger.warn(
-              `No assigned user email for lead ${lead.lead_id}, skipping auto-reply`,
-            );
-            continue;
-          }
-        } else {
-          mailbox = config.organization.sharedMailbox;
-          if (!mailbox) {
-            this.logger.warn(
-              `No shared mailbox configured for org ${orgId}, skipping auto-reply`,
-            );
-            continue;
-          }
-        }
-
-        try {
-          await this.sendAutoReply(
-            orgId,
-            lead,
-            config.template,
-            mailbox,
-            conversation.conversationId,
-            conversation.emails[0].emailId || '',
-            token,
-          );
-
-          // Update lead status to CONTACTED
+        // Use adminMailbox
+        const emailId = await this.sendAutoReply(
+          orgId,
+          lead,
+          config.template,
+          adminMailbox,
+          conversation.conversationId,
+          conversation.emails[0].emailId || '',
+          token,
+        );
+        if (emailId) {
           await this.prisma.lead.update({
             where: { lead_id: lead.lead_id },
             data: { status: LeadStatus.CONTACTED, updated_at: new Date() },
           });
-          this.logger.log(
-            `Lead ${lead.lead_id} status updated to CONTACTED after auto-reply`,
-          );
-
-          // Delay to avoid rate limits
-          await this.delay(200);
-        } catch (error) {
-          this.logger.error(
-            `Failed to process auto-reply for lead ${lead.lead_id}: ${error.message}`,
-          );
-          // Continue with next lead
         }
+        await this.delay(200);
+      } catch (leadError) {
+        this.logger.error(`Error processing lead ${lead.lead_id}: ${leadError.message}`);
+        // Silence: Continue to next lead
       }
-
-      this.logger.log(`Completed auto-reply processing for org ${orgId}`);
-    } catch (error) {
-      this.logger.error(
-        `Error processing auto-replies for org ${orgId}: ${error.message}`,
-      );
     }
+    this.logger.log(`Completed auto-reply processing for org ${orgId}`);
+  } catch (error) {
+    this.logger.error(`Overall error processing auto-replies for org ${orgId}: ${error.message}`);
+    // Silence: No throw
   }
+}
 
-  // Start dynamic auto-reply scheduling
   private async startDynamicAutoReply() {
     this.logger.log('Starting dynamic auto-reply for organizations');
-
     try {
       const configs = await this.prisma.autoReplyConfig.findMany({
         where: { isActive: true },
@@ -520,59 +596,38 @@ export class AutoReplyService {
 
       for (const config of configs) {
         if (!config.schedule) {
-          this.logger.log(
-            `No schedule defined for auto-reply config ${config.id}`,
-          );
+          this.logger.log(`No schedule defined for auto-reply config ${config.id}`);
           continue;
         }
         await this.scheduleAutoReply(config.orgId, config.id, config.schedule);
       }
     } catch (error) {
-      this.logger.error(
-        `Error starting dynamic auto-reply: ${error.message}`,
-        error.stack,
-      );
+      this.logger.error(`Error starting dynamic auto-reply: ${error.message}`);
     }
   }
 
-  // Schedule auto-reply job
-  async scheduleAutoReply(
-    orgId: string,
-    configId: string,
-    scheduleInterval: string,
-  ) {
+  private async scheduleAutoReply(orgId: string, configId: string, scheduleInterval: string) {
     const config = await this.prisma.autoReplyConfig.findUnique({
       where: { id: configId },
       select: { isActive: true, schedule: true },
     });
 
     if (!config?.isActive) {
-      this.logger.log(
-        `Auto-reply config ${configId} is inactive, skipping scheduling`,
-      );
+      this.logger.log(`Auto-reply config ${configId} is inactive, skipping scheduling`);
       return;
     }
 
     const jobKey = `${orgId}:${configId}`;
-    const existingJob = this.autoReplyJobs.get(jobKey);
-    if (existingJob) {
-      existingJob.cancel();
-      this.logger.log(`Cancelled old auto-reply job for ${jobKey}`);
-    }
+    this.autoReplyJobs.get(jobKey)?.cancel();
+    this.logger.log(`Cancelled old auto-reply job for ${jobKey}`);
 
-    const cronExpression =
-      this.cronMap[scheduleInterval] || this.cronMap.EVERY_HOUR;
-    this.logger.log(
-      `Scheduling auto-reply for org ${orgId}, config ${configId} with ${scheduleInterval} (${cronExpression})`,
-    );
+    const cronExpression = this.cronMap[scheduleInterval] || this.cronMap.EVERY_HOUR;
+    this.logger.log(`Scheduling auto-reply for org ${orgId}, config ${configId} with ${cronExpression}`);
 
     const job = schedule.scheduleJob(cronExpression, async () => {
-      this.logger.log(
-        `Running auto-reply job for org ${orgId}, config ${configId}`,
-      );
+      this.logger.log(`Running auto-reply job for org ${orgId}, config ${configId}`);
       await this.processAutoReplies(orgId, configId);
     });
-
     this.autoReplyJobs.set(jobKey, job);
   }
 
@@ -583,6 +638,7 @@ export class AutoReplyService {
       orderBy: { createdAt: 'desc' },
     });
   }
+
   async getByTriggerType(orgId: string, triggerType: string) {
     return this.prisma.autoReplyConfig.findMany({
       where: { orgId, triggerType },
@@ -601,30 +657,15 @@ export class AutoReplyService {
     mailbox: boolean,
     schedule: string,
   ) {
-    // Check user role
-    const user = await this.prisma.user.findUnique({
-      where: { user_id: userId },
-    });
-
-    const template = await this.prisma.emailTemplate.findUnique({
-      where: { id: templateId },
-    });
+    const user = await this.prisma.user.findUnique({ where: { user_id: userId } });
+    const template = await this.prisma.emailTemplate.findUnique({ where: { id: templateId } });
     if (!template || template.orgId !== orgId) {
-      throw new HttpException(
-        'Invalid or inaccessible template',
-        HttpStatus.BAD_REQUEST,
-      );
+      throw new HttpException('Invalid or inaccessible template', HttpStatus.BAD_REQUEST);
     }
-
-    // Validate schedule
     if (!Object.keys(this.cronMap).includes(schedule)) {
-      throw new HttpException(
-        'Invalid schedule interval',
-        HttpStatus.BAD_REQUEST,
-      );
+      throw new HttpException('Invalid schedule interval', HttpStatus.BAD_REQUEST);
     }
 
-    // Create config
     const config = await this.prisma.autoReplyConfig.create({
       data: {
         orgId,
@@ -640,7 +681,6 @@ export class AutoReplyService {
       include: { template: true },
     });
 
-    // Schedule auto-reply task
     await this.scheduleAutoReply(orgId, config.id, schedule);
     this.logger.log(`Auto-reply config created for org ${orgId}: ${name}`);
     return config;
@@ -658,69 +698,38 @@ export class AutoReplyService {
     schedule?: string,
     isActive?: boolean,
   ) {
-    // Check user role
-    const user = await this.prisma.user.findUnique({
-      where: { user_id: userId },
-    });
+    const user = await this.prisma.user.findUnique({ where: { user_id: userId } });
     if (!user || user.role !== 'ADMIN') {
       throw new ForbiddenException('Only admins can update auto-reply configs');
     }
 
-    // Validate config
     const config = await this.prisma.autoReplyConfig.findUnique({
       where: { id: configId },
       select: { orgId: true },
     });
     if (!config || config.orgId !== orgId) {
-      throw new HttpException(
-        'Auto-reply config not found',
-        HttpStatus.NOT_FOUND,
-      );
+      throw new HttpException('Auto-reply config not found', HttpStatus.NOT_FOUND);
     }
 
-    // Validate template if provided
     if (templateId) {
-      const template = await this.prisma.emailTemplate.findUnique({
-        where: { id: templateId },
-      });
+      const template = await this.prisma.emailTemplate.findUnique({ where: { id: templateId } });
       if (!template || template.orgId !== orgId) {
-        throw new HttpException(
-          'Invalid or inaccessible template',
-          HttpStatus.BAD_REQUEST,
-        );
+        throw new HttpException('Invalid or inaccessible template', HttpStatus.BAD_REQUEST);
       }
     }
 
-    // Validate schedule if provided
     if (schedule && !Object.keys(this.cronMap).includes(schedule)) {
-      throw new HttpException(
-        'Invalid schedule interval',
-        HttpStatus.BAD_REQUEST,
-      );
+      throw new HttpException('Invalid schedule interval', HttpStatus.BAD_REQUEST);
     }
 
-    // Update config
     const updatedConfig = await this.prisma.autoReplyConfig.update({
       where: { id: configId },
-      data: {
-        name,
-        description,
-        triggerType,
-        templateId,
-        mailbox, // Boolean: true for shared, false for user
-        schedule,
-        isActive,
-      },
+      data: { name, description, triggerType, templateId, mailbox, schedule, isActive },
       include: { template: true },
     });
 
-    // Reschedule if schedule or isActive changed
     if (schedule || isActive !== undefined) {
-      await this.scheduleAutoReply(
-        orgId,
-        configId,
-        updatedConfig.schedule || 'EVERY_HOUR',
-      );
+      await this.scheduleAutoReply(orgId, configId, updatedConfig.schedule || 'EVERY_HOUR');
     }
 
     this.logger.log(`Auto-reply config ${configId} updated for org ${orgId}`);
@@ -728,9 +737,7 @@ export class AutoReplyService {
   }
 
   async deleteConfig(orgId: string, userId: string, configId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { user_id: userId },
-    });
+    const user = await this.prisma.user.findUnique({ where: { user_id: userId } });
     if (!user || user.role !== 'ADMIN') {
       throw new ForbiddenException('Only admins can delete auto-reply configs');
     }
@@ -740,25 +747,14 @@ export class AutoReplyService {
       select: { orgId: true },
     });
     if (!config || config.orgId !== orgId) {
-      throw new HttpException(
-        'Auto-reply config not found',
-        HttpStatus.NOT_FOUND,
-      );
+      throw new HttpException('Auto-reply config not found', HttpStatus.NOT_FOUND);
     }
 
-    await this.prisma.autoReplyConfig.delete({
-      where: { id: configId },
-    });
-
+    await this.prisma.autoReplyConfig.delete({ where: { id: configId } });
     const jobKey = `${orgId}:${configId}`;
-    const job = this.autoReplyJobs.get(jobKey);
-    if (job) {
-      job.cancel();
-      this.autoReplyJobs.delete(jobKey);
-      this.logger.log(`Cancelled auto-reply job for ${jobKey}`);
-    }
-
-    this.logger.log(`Auto-reply config ${configId} deleted for org ${orgId}`);
+    this.autoReplyJobs.get(jobKey)?.cancel();
+    this.autoReplyJobs.delete(jobKey);
+    this.logger.log(`Cancelled auto-reply job for ${jobKey}`);
     return { message: 'Auto-reply config deleted successfully' };
   }
 }

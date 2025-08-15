@@ -112,7 +112,7 @@ export class LeadController {
       user.orgId,
       user.user_id,
       parseInt(page) || 1,
-      parseInt(pageSize) || 10,
+      parseInt(pageSize) || 5,
       { search, status: validatedStatuses, source: validatedSources },
     );
   }

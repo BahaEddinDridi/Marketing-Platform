@@ -46,7 +46,7 @@ export class AnalyticsController {
     return this.analyticsService.getDashboardData(
       new Date(startDate),
       new Date(endDate),
-      sectionList
+      sectionList,
     );
   }
 
@@ -55,7 +55,7 @@ export class AnalyticsController {
   async getPlatformConfigs() {
     return this.analyticsService.getPlatformConfigs();
   }
-  
+
   @Post()
   @UseGuards(JwtAuthGuard)
   create(@Body() createAnalyticsDto: CreateAnalyticsDto) {
@@ -87,5 +87,21 @@ export class AnalyticsController {
   @UseGuards(JwtAuthGuard)
   remove(@Param('id') id: string) {
     return this.analyticsService.remove(id);
+  }
+
+  @Get('calendar/campaigns-and-leads')
+  @UseGuards(JwtAuthGuard)
+  async getCampaignsAndLeads(
+    @Query('startDate') startDate: string,
+    @Query('endDate') endDate: string,
+  ) {
+    if (!startDate || !endDate) {
+      throw new BadRequestException('startDate and endDate are required');
+    }
+
+    return this.analyticsService.getCampaignsAndLeads(
+      new Date(startDate),
+      new Date(endDate),
+    );
   }
 }

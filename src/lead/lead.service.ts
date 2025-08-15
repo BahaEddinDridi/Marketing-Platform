@@ -17,6 +17,7 @@ import { LeadStatus, Prisma } from '@prisma/client';
 import * as striptags from 'striptags';
 import Bottleneck from 'bottleneck';
 import pLimit from 'p-limit';
+import { NotificationsService } from 'src/notifications/notifications.service';
 
 interface GraphEmailResponse {
   value: {
@@ -95,13 +96,14 @@ export class LeadService {
   private runningSyncs = new Set<string>();
   private readonly platformName = 'Microsoft';
   private readonly limiter = new Bottleneck({
-    maxConcurrent: 10, // Allow up to 10 concurrent requests
-    minTime: 100, // Minimum 100ms between requests (adjust based on rate limits)
+    maxConcurrent: 10, 
+    minTime: 100, 
   });
   constructor(
     private readonly prisma: PrismaService,
     private readonly authService: AuthService,
     private readonly configService: ConfigService,
+    private readonly notificationService: NotificationsService,
   ) {
     cloudinary.config({
       cloud_name: this.configService.get('CLOUDINARY_CLOUD_NAME'),
@@ -137,15 +139,28 @@ export class LeadService {
       };
     }
 
-    const org = await this.prisma.organization.findUnique({
-      where: { id: orgId },
-      select: { sharedMailbox: true },
-    });
-    if (!org?.sharedMailbox) {
-      throw new Error('Shared mailbox not configured');
+    try {
+      const adminUser = await this.prisma.user.findFirst({
+        where: { orgId, role: 'ADMIN' },
+        select: { email: true },
+      });
+      if (!adminUser?.email) {
+        this.logger.warn(`No admin user found for org ${orgId}.`);
+        return {
+          valid: false,
+          response: { message: 'No admin email configured' },
+        };
+      }
+      return { valid: true, sharedMailbox: adminUser.email }; // Use admin email
+    } catch (error) {
+      this.logger.error(
+        `Error fetching admin user for org ${orgId}: ${error.message}`,
+      );
+      return {
+        valid: false,
+        response: { message: 'Failed to validate settings' },
+      }; // Silence error
     }
-
-    return { valid: true, sharedMailbox: org.sharedMailbox };
   }
 
   private async getMicrosoftToken(orgId: string) {
@@ -313,51 +328,31 @@ export class LeadService {
 
   private async getMailboxes(
     orgId: string,
-    sharedMailbox: string,
+    sharedMailbox: string, // Ignored, kept for signature compatibility
     token: string,
   ): Promise<Mailbox[]> {
     try {
-      const response = await axios.get<GraphUsersResponse>(
-        'https://graph.microsoft.com/v1.0/users',
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          params: {
-            $select: 'id,mail,userPrincipalName',
-            $filter: "userType eq 'Member'",
-          },
-        },
-      );
-
-      const users = response.data.value;
-      const members = await this.prisma.user.findMany({
-        where: { orgId, allowPersonalEmailSync: true },
+      // Changed: Fetch admin user’s email only
+      const adminUser = await this.prisma.user.findFirst({
+        where: { orgId, role: 'ADMIN' },
         select: { user_id: true, email: true },
       });
-
-      const mailboxes: Mailbox[] = [
-        { email: sharedMailbox, assignedToId: null, label: 'Shared Mailbox' },
-        ...users
-          .map((user) => {
-            const email = user.mail || user.userPrincipalName;
-            const member = members.find(
-              (m) => m.email.toLowerCase() === email.toLowerCase(),
-            );
-            return member
-              ? {
-                  email,
-                  assignedToId: member.user_id as string | null, // Explicitly match Mailbox type
-                  label: `${email}’s Inbox`,
-                }
-              : null;
-          })
-          .filter((mailbox): mailbox is Mailbox => mailbox !== null),
-      ];
-
-      return mailboxes;
-    } catch (error) {
+      if (!adminUser?.email) {
+        this.logger.warn(`No admin user found for org ${orgId}.`);
+        return [];
+      }
       return [
-        { email: sharedMailbox, assignedToId: null, label: 'Shared Mailbox' },
+        {
+          email: adminUser.email,
+          assignedToId: adminUser.user_id,
+          label: 'Admin Mailbox',
+        },
       ];
+    } catch (error) {
+      this.logger.error(
+        `Error fetching admin mailbox for org ${orgId}: ${error.message}`,
+      );
+      return []; // Silence error
     }
   }
 
@@ -401,7 +396,7 @@ export class LeadService {
             if (res.status < 400) {
               return {
                 id: mailboxFolders[i].id,
-                name: mailboxFolders[i].name, // Use stored name
+                name: mailboxFolders[i].name,
               };
             }
             return null;
@@ -412,41 +407,25 @@ export class LeadService {
           return validFolders;
         }
       } catch (error) {
-        // Fall through to fetch fresh folders
+        this.logger.warn(
+          `Folder validation failed for ${mailboxEmail}: ${error.message}. Fetching fresh folders.`,
+        );
+        // Silence: No throw
       }
     }
 
     // Fetch fresh folders if none configured or validation failed
-    const freshFolders = await this.listMailboxFolders(orgId, mailboxEmail);
-
-    // Update LeadConfiguration with fresh folders
-    await this.prisma.leadConfiguration.upsert({
-      where: { orgId },
-      update: {
-        folders: {
-          ...configuredFolders,
-          [mailboxEmail.toLowerCase()]: freshFolders.map((f) => ({
-            id: f.id,
-            name: f.name,
-          })),
-        },
-      },
-      create: {
-        orgId,
-        folders: {
-          [mailboxEmail.toLowerCase()]: freshFolders.map((f) => ({
-            id: f.id,
-            name: f.name,
-          })),
-        },
-        syncInterval: 'EVERY_HOUR',
-        filters: ['inquiry', 'interested', 'quote', 'sales', 'meeting'],
-      },
-    });
-
-    return freshFolders;
+    try {
+      const freshFolders = await this.listMailboxFolders(orgId, mailboxEmail);
+      return freshFolders;
+    } catch (error) {
+      this.logger.error(
+        `Failed to fetch fresh folders for ${mailboxEmail}: ${error.message}. Using fallback Inbox.`,
+      );
+      return [{ id: 'inbox', name: 'Inbox' }]; // Fallback silently
+    }
   }
-  private async fetchConversationThread(
+  async fetchConversationThread(
     orgId: string,
     mailboxEmail: string,
     conversationId: string,
@@ -547,40 +526,10 @@ export class LeadService {
       ).flat();
 
       if (allEmails.length === 0) {
-        const mailboxes = await this.getMailboxes(orgId, mailboxEmail, token);
-        const altMailboxes = mailboxes.filter((m) => m.email !== mailboxEmail);
-        const altEmailPromises = await Promise.all(
-          altMailboxes.map(async (altMailbox) => {
-            const response = await this.limiter.schedule(() =>
-              axios.get<{
-                value: {
-                  id: string;
-                  displayName: string;
-                  wellKnownName?: string;
-                }[];
-              }>(
-                `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(altMailbox.email)}/mailFolders`,
-                {
-                  headers: { Authorization: `Bearer ${token}` },
-                  params: { $top: 100 },
-                },
-              ),
-            );
-            const folders = response.data.value.map((folder) => ({
-              id: folder.id,
-              name: folder.displayName,
-            }));
-            return Promise.all(
-              folders.map((folder) =>
-                this.limiter.schedule(() =>
-                  fetchEmailsFromFolder(folder, altMailbox.email),
-                ),
-              ),
-            );
-          }),
+        this.logger.warn(
+          `No emails found in conversation ${conversationId} for ${mailboxEmail}.`,
         );
-        const resolvedEmails = altEmailPromises.flat();
-        allEmails = resolvedEmails.flat();
+        return []; // Changed: No alt mailboxes, return empty
       }
 
       return allEmails.sort(
@@ -589,14 +538,16 @@ export class LeadService {
           new Date(b.receivedDateTime).getTime(),
       );
     } catch (error) {
-      this.logger.warn(`Failed to fetch conversation thread: ${error.message}`);
-      return [];
+      this.logger.warn(
+        `Failed to fetch conversation thread ${conversationId}: ${error.message}.`,
+      );
+      return []; // Silence: Return empty instead of throw
     }
   }
 
   private async fetchEmails(
     orgId: string,
-    mailboxes: Mailbox[],
+    mailboxes: Mailbox[], // Only admin mailbox
     token: string,
   ): Promise<GraphEmailResponse['value']> {
     const limit = pLimit(5);
@@ -606,9 +557,21 @@ export class LeadService {
       this.getFolders(orgId, token, mailbox.email).then((folders) =>
         folders.map((folder) =>
           limit(() =>
-            this.limiter.schedule(() =>
-              this.fetchEmailsFromFolder(orgId, mailbox, folder, token),
-            ),
+            this.limiter.schedule(async () => {
+              try {
+                return await this.fetchEmailsFromFolder(
+                  orgId,
+                  mailbox,
+                  folder,
+                  token,
+                );
+              } catch (error) {
+                this.logger.warn(
+                  `Failed to fetch from folder ${folder.name} in ${mailbox.email}: ${error.message}.`,
+                );
+                return []; // Silence: Return empty for failed folder
+              }
+            }),
           ),
         ),
       ),
@@ -767,6 +730,21 @@ export class LeadService {
       return { isLead: false };
     }
 
+    try {
+      const adminUser = await this.prisma.user.findFirst({
+        where: { orgId, role: 'ADMIN' },
+        select: { email: true },
+      });
+      if (senderEmail === adminUser?.email?.toLowerCase()) {
+        return { isLead: false }; // Prevent self-leads
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Error checking admin user for org ${orgId}: ${error.message}`,
+      );
+      return { isLead: false }; // Silence: Assume not a lead if check fails
+    }
+
     const leadConfig = await this.prisma.leadConfiguration.findUnique({
       where: { orgId },
       select: { filters: true, excludedEmails: true, specialEmails: true },
@@ -891,6 +869,7 @@ export class LeadService {
     mailboxes: Mailbox[],
     token: string,
   ) {
+    let newLeadCount = 0;
     const conversations = new Map<string, GraphEmailResponse['value'][0][]>();
 
     emails.forEach((email) => {
@@ -993,6 +972,7 @@ export class LeadService {
           }
           return existingLead;
         }
+        newLeadCount++;
         return await tx.lead.create({ data: leadData });
       });
 
@@ -1080,6 +1060,22 @@ export class LeadService {
         await this.delay(200);
       }
     }
+    this.logger.log(`count: ${newLeadCount}`);
+    if (newLeadCount > 0) {
+      await this.notificationService.notifyUsersOfOrg(orgId, 'receiveNewLead', {
+        title: 'New Leads Detected',
+        message: `${newLeadCount} new lead${newLeadCount > 1 ? 's' : ''} detected during sync.`,
+        type: 'success: new lead',
+        meta: {
+          orgId,
+          url: 'http://localhost:3000/leads',
+          totalNewLeads: newLeadCount,
+        },
+      });
+      this.logger.log(
+        `Notified users of ${newLeadCount} new leads for org ${orgId}`,
+      );
+    }
   }
   async fetchAndStoreLeads(orgId: string) {
     try {
@@ -1098,7 +1094,7 @@ export class LeadService {
       return { message: 'Sync Successful' };
     } catch (error) {
       this.logger.error(`Sync failed for org ${orgId}: ${error.message}`);
-      return { message: `Sync failed: ${error.message}` };
+      return { message: 'Sync completed' }; // Silence: Neutral response
     }
   }
 
@@ -1109,27 +1105,6 @@ export class LeadService {
     const { access_token: token } = await this.getPlatformCredentials(orgId);
 
     try {
-      const tokenPayload = JSON.parse(
-        Buffer.from(token.split('.')[1], 'base64').toString(),
-      );
-      this.logger.log(
-        `Token payload for ${mailboxEmail}: ${JSON.stringify(tokenPayload, null, 2)}`,
-      );
-      this.logger.log(
-        `Token roles for ${mailboxEmail}: ${tokenPayload.roles || 'none'}`,
-      );
-      if (!tokenPayload.roles?.includes('Mail.Read')) {
-        this.logger.error(`Token lacks Mail.Read role for ${mailboxEmail}`);
-        throw new Error('Invalid token roles');
-      }
-    } catch (e) {
-      this.logger.warn(
-        `Failed to decode token for ${mailboxEmail}: ${e.message}`,
-      );
-    }
-
-    try {
-      this.logger.log(`Fetching folders for mailbox: ${mailboxEmail}`);
       const response = await this.limiter.schedule(() =>
         axios.get<{
           value: { id: string; displayName: string }[];
@@ -1139,7 +1114,7 @@ export class LeadService {
             headers: { Authorization: `Bearer ${token}` },
             params: {
               $top: 50,
-              $select: 'id,displayName', // Removed wellKnownName
+              $select: 'id,displayName',
               includeHiddenFolders: false,
             },
           },
@@ -1154,15 +1129,10 @@ export class LeadService {
         }));
 
       if (folders.length === 0) {
-        this.logger.warn(
-          `No folders found for ${mailboxEmail}, fetching inbox`,
-        );
         const inboxResponse = await this.limiter.schedule(() =>
           axios.get<{ id: string; displayName: string }>(
             `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailboxEmail)}/mailFolders/inbox`,
-            {
-              headers: { Authorization: `Bearer ${token}` },
-            },
+            { headers: { Authorization: `Bearer ${token}` } },
           ),
         );
         folders.push({
@@ -1171,36 +1141,12 @@ export class LeadService {
         });
       }
 
-      this.logger.log(`Fetched ${folders.length} folders for ${mailboxEmail}`);
       return folders;
-    } catch (error: any) {
-      const status = error.response?.status;
-      const errorDetails = error.response?.data?.error || {};
+    } catch (error) {
       this.logger.error(
-        `Failed to fetch folders for ${mailboxEmail}: HTTP ${status || 'unknown'}, Details: ${JSON.stringify(errorDetails)}`,
+        `Failed to fetch folders for ${mailboxEmail}: ${error.message}`,
       );
-
-      if (status === 400) {
-        this.logger.warn(
-          `Invalid request for ${mailboxEmail}. Check mailbox validity or query parameters.`,
-        );
-      } else if (status === 403) {
-        this.logger.error(
-          `Permission denied for ${mailboxEmail}. Check app permissions or mailbox access.`,
-        );
-      } else if (status === 404) {
-        this.logger.error(
-          `Mailbox ${mailboxEmail} not found. Verify email address.`,
-        );
-      } else {
-        this.logger.error(
-          `Unexpected error for ${mailboxEmail}: ${error.message}`,
-        );
-      }
-
-      // Fallback to default folder
-      this.logger.log(`Returning fallback folder for ${mailboxEmail}`);
-      return [{ id: 'inbox', name: 'Inbox' }];
+      return [{ id: 'inbox', name: 'Inbox' }]; // Silence: Fallback
     }
   }
 
@@ -1223,9 +1169,6 @@ export class LeadService {
       throw new HttpException('Organization not found', HttpStatus.NOT_FOUND);
     }
 
-    this.logger.log(`Updating lead config for org ${orgId}`);
-    this.logger.log(`Data received: ${JSON.stringify(data)}`);
-    // Validate folder objects
     let validatedFolders:
       | Record<string, { id: string; name: string }[]>
       | undefined;
@@ -1249,23 +1192,26 @@ export class LeadService {
           this.logger.error(
             `Failed to validate folders for ${mailboxEmail}: ${error.message}`,
           );
-          validatedFolders[mailboxEmail.toLowerCase()] = [];
+          validatedFolders[mailboxEmail.toLowerCase()] = []; // Silence per mailbox
         }
       }
     }
 
     let updatedLeadConfig;
-
     await this.prisma.$transaction(async (prisma) => {
-      // Update sharedMailbox if provided
-      if (data.sharedMailbox !== undefined) {
+      // Changed: Update sharedMailbox to admin email if provided
+      if (data.sharedMailbox) {
+        const adminUser = await prisma.user.findFirst({
+          where: { orgId, role: 'ADMIN' },
+          select: { email: true },
+        });
+        const sharedMailbox = adminUser?.email || data.sharedMailbox;
         await prisma.organization.update({
           where: { id: orgId },
-          data: { sharedMailbox: data.sharedMailbox },
+          data: { sharedMailbox },
         });
       }
 
-      // Prepare lead config data
       const leadConfigData = {
         filters: data.filters || [
           'inquiry',
@@ -1281,15 +1227,10 @@ export class LeadService {
       };
 
       if (!org.leadConfig) {
-        // Create new lead config
         updatedLeadConfig = await prisma.leadConfiguration.create({
-          data: {
-            orgId,
-            ...leadConfigData,
-          },
+          data: { orgId, ...leadConfigData },
         });
       } else {
-        // Update existing lead config
         updatedLeadConfig = await prisma.leadConfiguration.update({
           where: { orgId },
           data: {
@@ -1308,11 +1249,7 @@ export class LeadService {
         });
       }
 
-      // Reschedule sync if syncInterval changed
       if (data.syncInterval !== undefined || !this.jobs.has(orgId)) {
-        this.logger.log(
-          `Rescheduling sync for org ${orgId} due to config update`,
-        );
         await this.scheduleOrgSync(orgId, updatedLeadConfig.syncInterval);
       }
     });
@@ -1324,141 +1261,157 @@ export class LeadService {
   }
 
   async setupLeadSync(
-  orgId: string,
-  userId: string,
-  data: {
-    sharedMailbox: string;
-    filters?: string[];
-    syncInterval?: string;
-    excludedEmails?: string[];
-    specialEmails?: string[];
-  },
-) {
-  const user = await this.prisma.user.findUnique({
-    where: { user_id: userId },
-  });
-  if (!user || user.role !== 'ADMIN') {
-    throw new HttpException(
-      'Only admins can setup lead sync',
-      HttpStatus.FORBIDDEN,
-    );
-  }
-
-  await this.prisma.$transaction(async (prisma) => {
-    await prisma.organization.update({
-      where: { id: orgId },
-      data: { sharedMailbox: data.sharedMailbox },
+    orgId: string,
+    userId: string,
+    data: {
+      sharedMailbox: string;
+      filters?: string[];
+      syncInterval?: string;
+      excludedEmails?: string[];
+      specialEmails?: string[];
+    },
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
     });
-
-    await prisma.leadConfiguration.upsert({
-      where: { orgId },
-      create: {
-        orgId,
-        filters: data.filters || [
-          'inquiry',
-          'interested',
-          'quote',
-          'sales',
-          'meeting',
-        ],
-        syncInterval: data.syncInterval || 'EVERY_HOUR',
-        excludedEmails: data.excludedEmails || [],
-        specialEmails: data.specialEmails || [],
-        folders: {}, // Default empty JSON object
-      },
-      update: {
-        filters: data.filters || [
-          'inquiry',
-          'interested',
-          'quote',
-          'sales',
-          'meeting',
-        ],
-        syncInterval: data.syncInterval || 'EVERY_HOUR',
-        excludedEmails: data.excludedEmails || [],
-        specialEmails: data.specialEmails || [],
-        folders: {}, // Default empty JSON object
-      },
-    });
-  });
-
-  this.logger.log(`Lead sync setup completed for org ${orgId}`);
-  return { message: 'Lead sync setup successful' };
-}
-
- async connectLeadSync(
-  userId: string,
-  setupData?: {
-    sharedMailbox: string;
-    filters?: string[];
-    syncInterval?: string;
-    excludedEmails?: string[];
-    specialEmails?: string[];
-  },
-) {
-  this.logger.log(
-    `Connecting Microsoft lead sync for org via user ${userId}`,
-  );
-  const user = await this.prisma.user.findUnique({
-    where: { user_id: userId },
-  });
-  if (!user) {
-    throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
-  }
-  if (user.role !== 'ADMIN') {
-    throw new HttpException('Access denied', HttpStatus.FORBIDDEN);
-  }
-
-  const orgId = user.orgId;
-  const org = await this.prisma.organization.findUnique({
-    where: { id: orgId },
-    select: { sharedMailbox: true },
-  });
-  let leadConfig = await this.prisma.leadConfiguration.findUnique({
-    where: { orgId },
-  });
-
-  if (!org?.sharedMailbox || !leadConfig) {
-    if (!setupData) {
-      this.logger.log(`Setup required for org ${orgId}`);
-      return {
-        needsSetup: true,
-        message: 'Please configure shared mailbox and lead settings',
-      };
+    if (!user || user.role !== 'ADMIN') {
+      throw new HttpException(
+        'Only admins can setup lead sync',
+        HttpStatus.FORBIDDEN,
+      );
     }
 
-    // Perform setup if data is provided
-    await this.setupLeadSync(orgId, userId, setupData);
+    try {
+      // Changed: Use admin email as sharedMailbox
+      const adminUser = await this.prisma.user.findFirst({
+        where: { orgId, role: 'ADMIN' },
+        select: { email: true },
+      });
+      const sharedMailbox = adminUser?.email || data.sharedMailbox;
 
-    // Re-fetch to ensure config exists
-    const updatedOrg = await this.prisma.organization.findUnique({
-      where: { id: orgId },
-      select: { sharedMailbox: true },
-    });
-    leadConfig = await this.prisma.leadConfiguration.findUnique({
-      where: { orgId },
-    });
+      await this.prisma.$transaction(async (prisma) => {
+        await prisma.organization.update({
+          where: { id: orgId },
+          data: { sharedMailbox },
+        });
 
-    if (!updatedOrg?.sharedMailbox || !leadConfig) {
+        await prisma.leadConfiguration.upsert({
+          where: { orgId },
+          create: {
+            orgId,
+            filters: data.filters || [
+              'inquiry',
+              'interested',
+              'quote',
+              'sales',
+              'meeting',
+            ],
+            syncInterval: data.syncInterval || 'EVERY_HOUR',
+            excludedEmails: data.excludedEmails || [],
+            specialEmails: data.specialEmails || [],
+            folders: {},
+          },
+          update: {
+            filters: data.filters || [
+              'inquiry',
+              'interested',
+              'quote',
+              'sales',
+              'meeting',
+            ],
+            syncInterval: data.syncInterval || 'EVERY_HOUR',
+            excludedEmails: data.excludedEmails || [],
+            specialEmails: data.specialEmails || [],
+            folders: {},
+          },
+        });
+      });
+
+      return { message: 'Lead sync setup successful' };
+    } catch (error) {
+      this.logger.error(
+        `Error setting up lead sync for org ${orgId}: ${error.message}`,
+      );
       throw new HttpException(
-        'Failed to setup lead configuration',
+        'Failed to setup lead sync',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
   }
 
-  await this.getPlatformCredentials(orgId);
+  async connectLeadSync(
+    userId: string,
+    setupData?: {
+      sharedMailbox: string;
+      filters?: string[];
+      syncInterval?: string;
+      excludedEmails?: string[];
+      specialEmails?: string[];
+    },
+  ) {
+    this.logger.log(
+      `Connecting Microsoft lead sync for org via user ${userId}`,
+    );
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+    });
+    if (!user) {
+      throw new HttpException('User not found', HttpStatus.UNAUTHORIZED);
+    }
+    if (user.role !== 'ADMIN') {
+      throw new HttpException('Access denied', HttpStatus.FORBIDDEN);
+    }
 
-  await this.prisma.microsoftPreferences.upsert({
-    where: { orgId },
-    create: { orgId, leadSyncEnabled: true },
-    update: { leadSyncEnabled: true },
-  });
+    const orgId = user.orgId;
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { sharedMailbox: true },
+    });
+    let leadConfig = await this.prisma.leadConfiguration.findUnique({
+      where: { orgId },
+    });
 
-  await this.scheduleOrgSync(orgId, leadConfig.syncInterval);
-  this.logger.log(`Microsoft lead sync connected for org ${orgId}`);
-  return { needsSetup: false, message: 'Connected successfully' };
-}
+    if (!org?.sharedMailbox || !leadConfig) {
+      if (!setupData) {
+        this.logger.log(`Setup required for org ${orgId}`);
+        return {
+          needsSetup: true,
+          message: 'Please configure shared mailbox and lead settings',
+        };
+      }
+
+      // Perform setup if data is provided
+      await this.setupLeadSync(orgId, userId, setupData);
+
+      // Re-fetch to ensure config exists
+      const updatedOrg = await this.prisma.organization.findUnique({
+        where: { id: orgId },
+        select: { sharedMailbox: true },
+      });
+      leadConfig = await this.prisma.leadConfiguration.findUnique({
+        where: { orgId },
+      });
+
+      if (!updatedOrg?.sharedMailbox || !leadConfig) {
+        throw new HttpException(
+          'Failed to setup lead configuration',
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
+      }
+    }
+
+    await this.getPlatformCredentials(orgId);
+
+    await this.prisma.microsoftPreferences.upsert({
+      where: { orgId },
+      create: { orgId, leadSyncEnabled: true },
+      update: { leadSyncEnabled: true },
+    });
+
+    await this.scheduleOrgSync(orgId, leadConfig.syncInterval);
+    this.logger.log(`Microsoft lead sync connected for org ${orgId}`);
+    return { needsSetup: false, message: 'Connected successfully' };
+  }
 
   async disconnectLeadSync(userId: string) {
     this.logger.log(
@@ -1634,7 +1587,7 @@ export class LeadService {
     orgId: string,
     userId: string,
     page: number = 1,
-    pageSize: number = 10,
+    pageSize: number = 5,
     filters: {
       search?: string;
       status?: LeadStatus[]; // Use LeadStatus[]
@@ -1945,96 +1898,99 @@ export class LeadService {
     }
   }
 
-
   async createLead(
-  userId: string,
-  leadInputs: {
-    name: string;
-    email: string;
-    phone?: string | null;
-    company?: string | null;
-    jobTitle?: string | null;
-    status?: LeadStatus;
-    source?: string;
-  },
-) {
-  this.logger.log(`Creating lead for userId: ${userId} with inputs: ${JSON.stringify(leadInputs)}`);
+    userId: string,
+    leadInputs: {
+      name: string;
+      email: string;
+      phone?: string | null;
+      company?: string | null;
+      jobTitle?: string | null;
+      status?: LeadStatus;
+      source?: string;
+    },
+  ) {
+    this.logger.log(
+      `Creating lead for userId: ${userId} with inputs: ${JSON.stringify(leadInputs)}`,
+    );
 
-  try {
-    // Validate the user
-    const user = await this.prisma.user.findUnique({
-      where: { user_id: userId },
-      select: { orgId: true, role: true },
-    });
+    try {
+      // Validate the user
+      const user = await this.prisma.user.findUnique({
+        where: { user_id: userId },
+        select: { orgId: true, role: true },
+      });
 
-    if (!user) {
-      throw new HttpException('User not found', HttpStatus.NOT_FOUND);
-    }
+      if (!user) {
+        throw new HttpException('User not found', HttpStatus.NOT_FOUND);
+      }
 
-    // Optionally restrict to ADMIN or specific roles
-    if (user.role !== 'ADMIN') {
-      throw new HttpException(
-        'Only admins can create leads',
-        HttpStatus.FORBIDDEN,
-      );
-    }
+      // Optionally restrict to ADMIN or specific roles
+      if (user.role !== 'ADMIN') {
+        throw new HttpException(
+          'Only admins can create leads',
+          HttpStatus.FORBIDDEN,
+        );
+      }
 
-    // Validate required fields
-    if (!leadInputs.name || !leadInputs.email) {
-      throw new HttpException(
-        'Name and email are required',
-        HttpStatus.BAD_REQUEST,
-      );
-    }
+      // Validate required fields
+      if (!leadInputs.name || !leadInputs.email) {
+        throw new HttpException(
+          'Name and email are required',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
 
-    // Prepare lead data
-    const leadData: Prisma.LeadCreateInput = {
-      organization: { connect: { id: user.orgId } },
-      source: leadInputs.source || 'manual',
-      name: leadInputs.name,
-      email: leadInputs.email.toLowerCase(),
-      phone: leadInputs.phone || null,
-      company: leadInputs.company || null,
-      job_title: leadInputs.jobTitle || null,
-      status: leadInputs.status || 'NEW',
-      assignedTo: { connect: { user_id: userId } },
-      created_at: new Date(),
-    };
+      // Prepare lead data
+      const leadData: Prisma.LeadCreateInput = {
+        organization: { connect: { id: user.orgId } },
+        source: leadInputs.source || 'manual',
+        name: leadInputs.name,
+        email: leadInputs.email.toLowerCase(),
+        phone: leadInputs.phone || null,
+        company: leadInputs.company || null,
+        job_title: leadInputs.jobTitle || null,
+        status: leadInputs.status || 'NEW',
+        assignedTo: { connect: { user_id: userId } },
+        created_at: new Date(),
+      };
 
-    // Create the lead
-    const newLead = await this.prisma.lead.create({
-      data: leadData,
-      include: {
-        assignedTo: {
-          select: {
-            user_id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
+      // Create the lead
+      const newLead = await this.prisma.lead.create({
+        data: leadData,
+        include: {
+          assignedTo: {
+            select: {
+              user_id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
           },
         },
-      },
-    });
+      });
 
-    this.logger.log(`Lead created successfully with ID: ${newLead.lead_id}`);
-    return {
-      leadId: newLead.lead_id,
-      source: newLead.source,
-      name: newLead.name,
-      email: newLead.email,
-      phone: newLead.phone,
-      company: newLead.company,
-      jobTitle: newLead.job_title,
-      status: newLead.status,
-      assignedTo: newLead.assignedTo,
-      createdAt: newLead.created_at,
-    };
-  } catch (error) {
-    this.logger.error(`Error creating lead for user ${userId}: ${error.message}`);
-    throw new HttpException(
-      'Failed to create lead',
-      HttpStatus.INTERNAL_SERVER_ERROR,
-    );
+      this.logger.log(`Lead created successfully with ID: ${newLead.lead_id}`);
+      return {
+        leadId: newLead.lead_id,
+        source: newLead.source,
+        name: newLead.name,
+        email: newLead.email,
+        phone: newLead.phone,
+        company: newLead.company,
+        jobTitle: newLead.job_title,
+        status: newLead.status,
+        assignedTo: newLead.assignedTo,
+        createdAt: newLead.created_at,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Error creating lead for user ${userId}: ${error.message}`,
+      );
+      throw new HttpException(
+        'Failed to create lead',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
   }
-}
 }

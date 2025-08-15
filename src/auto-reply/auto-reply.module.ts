@@ -4,9 +4,10 @@ import { AutoReplyController } from './auto-reply.controller';
 import { PrismaModule } from 'src/prisma/prisma.module';
 import { AuthModule } from 'src/auth/auth.module';
 import { ConfigModule } from '@nestjs/config';
+import { LeadModule } from 'src/lead/lead.module';
 
 @Module({
-  imports: [PrismaModule, AuthModule, ConfigModule],
+  imports: [PrismaModule, AuthModule, ConfigModule, LeadModule],
   controllers: [AutoReplyController],
   providers: [AutoReplyService],
 })

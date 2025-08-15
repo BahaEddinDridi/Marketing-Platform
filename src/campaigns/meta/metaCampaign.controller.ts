@@ -8,6 +8,7 @@ import {
   Delete,
   Patch,
   InternalServerErrorException,
+  Query,
 } from '@nestjs/common';
 import { MetaCampaignInput, MetaCampaignService } from './metaCampaign.service';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
@@ -22,8 +23,42 @@ export class MetaCampaignController {
 
   @Get('/list')
   @UseGuards(JwtAuthGuard)
-  async listMetaCampaigns() {
-    return this.metaCampaignService.fetchAllCampaigns();
+  async listMetaCampaigns(
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+    @Query('objective') objective?: string,
+    @Query('buyingType') buyingType?: string,
+    @Query('bidStrategy') bidStrategy?: string,
+    @Query('startDateFrom') startDateFrom?: string,
+    @Query('startDateTo') startDateTo?: string,
+    @Query('endDateFrom') endDateFrom?: string,
+    @Query('endDateTo') endDateTo?: string,
+    @Query('minDailyBudget') minDailyBudget?: number,
+    @Query('maxDailyBudget') maxDailyBudget?: number,
+    @Query('minLifetimeBudget') minLifetimeBudget?: number,
+    @Query('maxLifetimeBudget') maxLifetimeBudget?: number,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortOrder') sortOrder?: 'asc' | 'desc',
+  ) {
+    return this.metaCampaignService.fetchAllCampaigns({
+      search,
+      status,
+      objective,
+      startDateFrom: startDateFrom ? new Date(startDateFrom) : undefined,
+      startDateTo: startDateTo ? new Date(startDateTo) : undefined,
+      endDateFrom: endDateFrom ? new Date(endDateFrom) : undefined,
+      endDateTo: endDateTo ? new Date(endDateTo) : undefined,
+      minDailyBudget,
+      maxDailyBudget,
+      minLifetimeBudget,
+      maxLifetimeBudget,
+      page,
+      limit,
+      sortBy,
+      sortOrder,
+    });
   }
 
   @Get('/list/:campaignId')

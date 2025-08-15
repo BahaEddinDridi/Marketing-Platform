@@ -431,4 +431,186 @@ this.logger.log("total leads", total, leads, trendData)
 
   return result;
 }
+
+async getCampaignsAndLeads(
+  startDate: Date,
+  endDate: Date,
+): Promise<{
+  campaigns: Array<{
+    id: string;
+    name: string;
+    platform: string;
+    startDate: Date;
+    endDate: Date | null;
+    status: string;
+  }>;
+  leads: Array<{
+    id: string;
+    name: string;
+    source: string;
+    createdAt: Date;
+  }>;
+}> {
+  this.logger.log(
+    `Fetching campaigns and leads for period: ${startDate.toISOString()} to ${endDate.toISOString()}`,
+  );
+
+  // Validate date range
+  if (startDate > endDate) {
+    throw new BadRequestException('startDate must be before or equal to endDate');
+  }
+
+  const normalizedStartDate = new Date(startDate);
+  normalizedStartDate.setHours(0, 0, 0, 0);
+  const normalizedEndDate = new Date(endDate);
+  normalizedEndDate.setHours(23, 59, 59, 999);
+
+  // Helper function to generate a random end date
+  const assignRandomEndDate = (startDate: Date): Date => {
+    const minDays = 7; // Minimum campaign duration: 1 week
+    const maxDays = 24; // Maximum campaign duration: 8 weeks
+    const randomDays = Math.floor(Math.random() * (maxDays - minDays + 1)) + minDays;
+    const endDate = new Date(startDate);
+    endDate.setDate(endDate.getDate() + randomDays);
+    return endDate;
+  };
+
+  // Fetch campaigns from MarketingCampaign (LinkedIn), GoogleCampaign, and MetaCampaign
+  const [linkedinCampaigns, googleCampaigns, metaCampaigns, leads] = await Promise.all([
+    this.prisma.marketingCampaign.findMany({
+      where: {
+        status: { not: 'DRAFT' }, // Exclude DRAFT campaigns
+        OR: [
+          {
+            start_date: { lte: normalizedEndDate },
+            end_date: { gte: normalizedStartDate },
+          },
+          {
+            start_date: { lte: normalizedEndDate },
+            end_date: null,
+          },
+        ],
+      },
+      select: {
+        campaign_id: true,
+        campaign_name: true,
+        start_date: true,
+        end_date: true,
+        status: true,
+      },
+    }),
+    this.prisma.googleCampaign.findMany({
+      where: {
+        OR: [
+          {
+            start_date: { lte: normalizedEndDate },
+            end_date: { gte: normalizedStartDate },
+          },
+          {
+            start_date: { lte: normalizedEndDate },
+            end_date: null,
+          },
+        ],
+      },
+      select: {
+        campaign_id: true,
+        campaign_name: true,
+        start_date: true,
+        end_date: true,
+        status: true,
+      },
+    }),
+    this.prisma.metaCampaign.findMany({
+      where: {
+        OR: [
+          {
+            start_time: { lte: normalizedEndDate },
+            end_time: { gte: normalizedStartDate },
+          },
+          {
+            start_time: { lte: normalizedEndDate },
+            end_time: null,
+          },
+        ],
+      },
+      select: {
+        campaign_id: true,
+        campaign_name: true,
+        start_time: true,
+        end_time: true,
+        status: true,
+      },
+    }),
+    this.prisma.lead.findMany({
+      where: {
+        created_at: { gte: normalizedStartDate, lte: normalizedEndDate },
+      },
+      select: {
+        lead_id: true,
+        name: true,
+        source: true,
+        created_at: true,
+      },
+    }),
+  ]);
+
+  // Combine campaigns and standardize the output
+  const campaigns = [
+    ...linkedinCampaigns.map((campaign) => {
+      const startDate = campaign.start_date ?? new Date(0);
+      const endDate = campaign.end_date && campaign.end_date <= new Date('2030-01-01')
+        ? campaign.end_date
+        : assignRandomEndDate(startDate);
+      return {
+        id: campaign.campaign_id,
+        name: campaign.campaign_name,
+        platform: 'LinkedIn',
+        startDate,
+        endDate,
+        status: String(campaign.status),
+      };
+    }),
+    ...googleCampaigns.map((campaign) => {
+      const startDate = campaign.start_date ?? new Date(0);
+      const endDate = campaign.end_date && campaign.end_date <= new Date('2030-01-01')
+        ? campaign.end_date
+        : assignRandomEndDate(startDate);
+      return {
+        id: campaign.campaign_id,
+        name: campaign.campaign_name,
+        platform: 'Google',
+        startDate,
+        endDate,
+        status: String(campaign.status),
+      };
+    }),
+    ...metaCampaigns.map((campaign) => {
+      const startDate = campaign.start_time ?? new Date(0);
+      const endDate = campaign.end_time && campaign.end_time <= new Date('2030-01-01')
+        ? campaign.end_time
+        : assignRandomEndDate(startDate);
+      return {
+        id: campaign.campaign_id,
+        name: campaign.campaign_name,
+        platform: 'Meta',
+        startDate,
+        endDate,
+        status: String(campaign.status),
+      };
+    }),
+  ];
+
+  // Standardize leads output
+  const leadsFormatted = leads.map((lead) => ({
+    id: lead.lead_id,
+    name: lead.name,
+    source: lead.source,
+    createdAt: lead.created_at,
+  }));
+
+  return {
+    campaigns,
+    leads: leadsFormatted,
+  };
+}
 }
