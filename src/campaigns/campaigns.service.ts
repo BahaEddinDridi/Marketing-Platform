@@ -192,105 +192,189 @@ export class CampaignsService {
     return this.prisma.marketingCampaign.create({ data: createCampaignDto });
   }
 
-  async findAll(
-  page: number = 1,
-  pageSize: number = 5,
-  campaignGroupId?: string,
-  objective?: ObjectiveType,
-  status?: CampaignStatus,
-  search?: string,
-): Promise<{
-  campaigns: CampaignResponse[];
-  pagination: {
-    currentPage: number;
-    totalPages: number;
-    totalItems: number;
-  };
-}> {
-  const skip = (page - 1) * pageSize;
-  const take = pageSize;
-this.logger.log("queries", campaignGroupId, objective, status, search)
-  // Build the where clause dynamically
-  const where: any = {};
+ async findAll(filters: {
+  search?: string;
+  status?: string | string[];
+  objective?: string | string[];
+  campaignGroupId?: string | string[];
+  startDateFrom?: Date;
+  startDateTo?: Date;
+  endDateFrom?: Date;
+  endDateTo?: Date;
+  minDailyBudget?: number;
+  maxDailyBudget?: number;
+  minLifetimeBudget?: number;
+  maxLifetimeBudget?: number;
+  page?: number;
+  limit?: number;
+  sortBy?: string;
+  sortOrder?: 'asc' | 'desc';
+} = {}) {
+  this.logger.log('Fetching LinkedIn campaigns from database with filters:', filters);
 
-  if (campaignGroupId) {
-    where.campaign_group_id = campaignGroupId;
-  }
+  try {
+    // Validate date ranges
+    if (filters.startDateFrom && filters.startDateTo && filters.startDateFrom > filters.startDateTo) {
+      throw new Error('startDateFrom must be before or equal to startDateTo');
+    }
+    if (filters.endDateFrom && filters.endDateTo && filters.endDateFrom > filters.endDateTo) {
+      throw new Error('endDateFrom must be before or equal to endDateTo');
+    }
 
-  if (objective && Object.values(ObjectiveType).includes(objective)) {
-    where.objective = objective;
-  }
+    // Initialize where clause
+    const where: any = {};
 
-  if (status && Object.values(CampaignStatus).includes(status)) {
-    where.status = status;
-  }
+    // Add filters if provided
+    if (filters.status) {
+      where.status = Array.isArray(filters.status)
+        ? { in: filters.status }
+        : { in: [filters.status] };
+    }
 
-  if (search) {
-    where.campaign_name = {
-      contains: search,
-      mode: 'insensitive', // Case-insensitive search
+    if (filters.search) {
+      where.OR = [
+        { campaign_name: { contains: filters.search, mode: 'insensitive' } },
+        { campaign_id: { contains: filters.search, mode: 'insensitive' } },
+      ];
+    }
+
+    if (filters.objective) {
+      where.objective = Array.isArray(filters.objective)
+        ? { in: filters.objective }
+        : { in: [filters.objective] };
+    }
+
+    if (filters.campaignGroupId) {
+      where.campaign_group_id = Array.isArray(filters.campaignGroupId)
+        ? { in: filters.campaignGroupId }
+        : { in: [filters.campaignGroupId] };
+    }
+
+    // Date range filters
+    if (filters.startDateFrom || filters.startDateTo) {
+      where.start_date = {};
+      if (filters.startDateFrom) {
+        where.start_date.gte = filters.startDateFrom;
+      }
+      if (filters.startDateTo) {
+        where.start_date.lte = filters.startDateTo;
+      }
+    }
+
+    if (filters.endDateFrom || filters.endDateTo) {
+      where.end_date = {};
+      if (filters.endDateFrom) {
+        where.end_date.gte = filters.endDateFrom;
+      }
+      if (filters.endDateTo) {
+        where.end_date.lte = filters.endDateTo;
+      }
+    }
+
+    // Budget range filters
+    if (filters.minDailyBudget || filters.maxDailyBudget) {
+      where.budget = {};
+      if (filters.minDailyBudget) {
+        where.budget.gte = filters.minDailyBudget;
+      }
+      if (filters.maxDailyBudget) {
+        where.budget.lte = filters.maxDailyBudget;
+      }
+    }
+
+    if (filters.minLifetimeBudget || filters.maxLifetimeBudget) {
+      where.total_budget = {};
+      if (filters.minLifetimeBudget) {
+        where.total_budget.gte = filters.minLifetimeBudget;
+      }
+      if (filters.maxLifetimeBudget) {
+        where.total_budget.lte = filters.maxLifetimeBudget;
+      }
+    }
+
+    // Validate and calculate pagination
+    const page = Math.max(1, filters.page || 1);
+    const limit = Math.max(1, Math.min(100, filters.limit || 5)); // Cap limit to prevent abuse, default to 5 as original
+    const skip = (page - 1) * limit;
+
+    // Validate sortBy
+    const validSortFields = [
+      'created_at',
+      'updated_at',
+      'campaign_name',
+      'budget',
+      'total_budget',
+      'start_date',
+      'end_date',
+    ];
+    const sortBy = validSortFields.includes(filters.sortBy || '') ? filters.sortBy : 'updated_at';
+    const sortOrder = filters.sortOrder || 'desc';
+
+    // Execute query with pagination and sorting
+    const [campaigns, total] = await Promise.all([
+      this.prisma.marketingCampaign.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: {
+          [sortBy as string]: sortOrder,
+        },
+        include: {
+          platform: {
+            select: {
+              platform_id: true,
+              platform_name: true,
+              sync_status: true,
+            },
+          },
+          Ads: {
+            select: {
+              id: true,
+              name: true,
+              intendedStatus: true,
+              isServing: true,
+              reviewStatus: true,
+              createdAt: true,
+              lastModifiedAt: true,
+            },
+          },
+          CampaignGroup: {
+            select: {
+              id: true,
+              name: true,
+              status: true,
+            },
+          },
+          AdAccount: {
+            select: {
+              id: true,
+              name: true,
+              accountUrn: true,
+              status: true,
+            },
+          },
+        },
+      }),
+      this.prisma.marketingCampaign.count({ where }),
+    ]);
+
+    this.logger.log(
+      `Fetched ${campaigns.length} LinkedIn campaigns from database (total: ${total})`,
+    );
+
+    return {
+      data: campaigns,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
     };
+  } catch (error: any) {
+    this.logger.error(`Failed to fetch LinkedIn campaigns: ${error.message}`, error.stack);
+    throw new Error(`Failed to fetch LinkedIn campaigns: ${error.message}`);
   }
-
-  // Fetch paginated campaigns with filters
-  const campaigns = await this.prisma.marketingCampaign.findMany({
-    skip,
-    take,
-    where,
-    orderBy: {
-      updated_at: 'desc', // Sort by updated_at, newest first
-    },
-    include: {
-      platform: {
-        select: {
-          platform_id: true,
-          platform_name: true,
-          sync_status: true,
-        },
-      },
-      Ads: {
-        select: {
-          id: true,
-          name: true,
-          intendedStatus: true,
-          isServing: true,
-          reviewStatus: true,
-          createdAt: true,
-          lastModifiedAt: true,
-        },
-      },
-      CampaignGroup: {
-        select: {
-          id: true,
-          name: true,
-          status: true,
-        },
-      },
-      AdAccount: {
-        select: {
-          id: true,
-          name: true,
-          accountUrn: true,
-          status: true,
-        },
-      },
-    },
-  });
-
-  // Get total count for pagination metadata with the same filters
-  const totalItems = await this.prisma.marketingCampaign.count({ where });
-  const totalPages = Math.ceil(totalItems / pageSize);
-
-  this.logger.log('totalItems + totalPages', totalItems, totalPages);
-
-  return {
-    campaigns,
-    pagination: {
-      currentPage: page,
-      totalPages,
-      totalItems,
-    },
-  };
 }
 
   async findOne(campaign_id: string): Promise<CampaignResponse | null> {

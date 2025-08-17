@@ -8,6 +8,7 @@ import {
   Logger,
   NotFoundException,
   Param,
+  ParseArrayPipe,
   Patch,
   Post,
   Query,
@@ -45,8 +46,32 @@ export class GoogleCampaignController {
 
   @Get('/list')
   @UseGuards(JwtAuthGuard)
-  async listGoogleCampaigns() {
-    return this.googleCampaignsService.listCampaignsWithAdGroupsAndAds();
+  async listGoogleCampaigns(
+    @Query('search') search?: string,
+        @Query('status', new ParseArrayPipe({ items: String, optional: true, separator: ',' })) status?: string[],
+        @Query('advertisingChannelType', new ParseArrayPipe({ items: String, optional: true, separator: ',' })) advertisingChannelType?: string[],
+        @Query('startDateFrom') startDateFrom?: string,
+        @Query('startDateTo') startDateTo?: string,
+        @Query('endDateFrom') endDateFrom?: string,
+        @Query('endDateTo') endDateTo?: string,
+        @Query('page') page?: number,
+        @Query('limit') limit?: number,
+        @Query('sortBy') sortBy?: string,
+        @Query('sortOrder') sortOrder?: 'asc' | 'desc',
+  ) {
+    return this.googleCampaignsService.listCampaignsWithAdGroupsAndAds({
+      search,
+      status: status && status.length > 0 ? status : undefined,
+      advertisingChannelType: advertisingChannelType && advertisingChannelType.length > 0 ? advertisingChannelType : undefined,
+      startDateFrom: startDateFrom ? new Date(startDateFrom) : undefined,
+      startDateTo: startDateTo ? new Date(startDateTo) : undefined,
+      endDateFrom: endDateFrom ? new Date(endDateFrom) : undefined,
+      endDateTo: endDateTo ? new Date(endDateTo) : undefined,
+      page,
+      limit,
+      sortBy,
+      sortOrder,
+    });
   }
 
   @Get('/list/:campaignId')

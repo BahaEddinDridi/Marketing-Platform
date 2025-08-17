@@ -567,7 +567,7 @@ export class GoogleCampaignsService {
             title: 'Google Sync Successful',
             message: `Google campaigns were successfully synced for your organization.`,
             type: 'success: google sync',
-            meta: { orgId, url: "http://localhost:3000/campaigns" },
+            meta: { orgId, url: 'http://localhost:3000/campaigns' },
           },
         );
         this.logger.log(`Sync completed for org ${orgId}`);
@@ -644,9 +644,6 @@ export class GoogleCampaignsService {
     });
   }
 
-  /**
-   * Fetches and syncs campaigns for a specific client account
-   */
   async fetchAndSyncGoogleCampaigns(
     googleAccountId: string,
     customerId: string,
@@ -1023,9 +1020,6 @@ export class GoogleCampaignsService {
     }
   }
 
-  /**
-   * Fetches and syncs ad groups for a specific campaign
-   */
   async fetchAndSyncGoogleAdGroups(
     googleAccountId: string,
     customerId: string,
@@ -1192,9 +1186,6 @@ export class GoogleCampaignsService {
     }
   }
 
-  /**
-   * Fetches and syncs ads for a specific ad group
-   */
   async fetchAndSyncGoogleAds(
     googleAccountId: string,
     customerId: string,
@@ -1332,39 +1323,138 @@ export class GoogleCampaignsService {
     }
   }
 
-  /**
-   * Retrieves all campaigns with their ad groups and ads for an organization
-   */
-  async listCampaignsWithAdGroupsAndAds() {
-    // Fetch campaigns with only the specified fields
-    const campaigns = await this.prisma.googleCampaign.findMany({
-      select: {
-        campaign_id: true,
-        campaign_name: true,
-        status: true,
-        advertising_channel_type: true,
-        start_date: true,
-        campaign_budget: true,
-        end_date: true,
-        serving_status: true,
+  async listCampaignsWithAdGroupsAndAds(
+    filters: {
+      search?: string;
+      status?: string | string[];
+      advertisingChannelType?: string | string[];
+      startDateFrom?: Date;
+      startDateTo?: Date;
+      endDateFrom?: Date;
+      endDateTo?: Date;
+      page?: number;
+      limit?: number;
+      sortBy?: string;
+      sortOrder?: 'asc' | 'desc';
+    } = {},
+  ) {
+      this.logger.log('Fetching Meta campaigns from database with filters:', filters);
+
+    try {
+      // Validate date ranges
+      if (
+        filters.startDateFrom &&
+        filters.startDateTo &&
+        filters.startDateFrom > filters.startDateTo
+      ) {
+        throw new Error('startDateFrom must be before or equal to startDateTo');
+      }
+      if (
+        filters.endDateFrom &&
+        filters.endDateTo &&
+        filters.endDateFrom > filters.endDateTo
+      ) {
+        throw new Error('endDateFrom must be before or equal to endDateTo');
+      }
+
+      // Initialize where clause
+      const where: any = {};
+
+      // Add filters if provided
+      if (filters.status) {
+        where.status = Array.isArray(filters.status)
+          ? { in: filters.status }
+          : { in: [filters.status] };
+      }
+
+      if (filters.search) {
+        where.OR = [
+          { campaign_name: { contains: filters.search, mode: 'insensitive' } },
+          { campaign_id: { contains: filters.search, mode: 'insensitive' } },
+        ];
+      }
+
+      if (filters.advertisingChannelType) {
+        where.advertising_channel_type = Array.isArray(
+          filters.advertisingChannelType,
+        )
+          ? { in: filters.advertisingChannelType }
+          : { in: [filters.advertisingChannelType] };
+      }
+
+      // Date range filters
+      if (filters.startDateFrom || filters.startDateTo) {
+        where.start_time = {};
+        if (filters.startDateFrom) {
+          where.start_time.gte = filters.startDateFrom;
+        }
+        if (filters.startDateTo) {
+          where.start_time.lte = filters.startDateTo;
+        }
+      }
+
+      if (filters.endDateFrom || filters.endDateTo) {
+        where.end_time = {};
+        if (filters.endDateFrom) {
+          where.end_time.gte = filters.endDateFrom;
+        }
+        if (filters.endDateTo) {
+          where.end_time.lte = filters.endDateTo;
+        }
+      }
+      const page = Math.max(1, filters.page || 1);
+      const limit = Math.max(1, Math.min(100, filters.limit || 5)); // Cap limit to prevent abuse
+      const skip = (page - 1) * limit;
+
+      const validSortFields = [
+      'created_at',
+      'campaign_name',
+      'start_date',
+    ];
+    const sortBy = validSortFields.includes(filters.sortBy || '') ? filters.sortBy : 'created_at';
+    const sortOrder = filters.sortOrder || 'desc';
+
+      // Fetch campaigns with only the specified fields
+      const [campaigns, total] = await Promise.all([
+        this.prisma.googleCampaign.findMany({
+          where,
+          select: {
+            campaign_id: true,
+            campaign_name: true,
+            status: true,
+            advertising_channel_type: true,
+            start_date: true,
+            campaign_budget: true,
+            end_date: true,
+            serving_status: true,
+          },
+          skip,
+          take: limit,
+          orderBy: {
+            [sortBy as string]: sortOrder,
+          },
+        }),
+        this.prisma.googleCampaign.count({ where }),
+      ]);
+
+      this.logger.log(`Retrieved ${campaigns.length} campaigns`);
+
+      return {
+        data: campaigns,
+        pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
       },
-    });
-
-    this.logger.log(`Retrieved ${campaigns.length} campaigns`);
-
-    return {
-      message: 'Campaigns retrieved successfully',
-      campaigns: campaigns.map((campaign) => ({
-        campaign_id: campaign.campaign_id,
-        campaign_name: campaign.campaign_name,
-        status: campaign.status,
-        advertising_channel_type: campaign.advertising_channel_type,
-        campaign_budget:campaign.campaign_budget,
-        start_date: campaign.start_date,
-        end_date: campaign.end_date,
-        serving_status: campaign.serving_status,
-      })),
-    };
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to fetch Meta campaigns: ${error.message}`,
+        error.stack,
+      );
+      throw new Error(`Failed to fetch Meta campaigns: ${error.message}`);
+    }
   }
   async getCampaignById(campaignId: string) {
     // Fetch the campaign by ID with ad groups and ads

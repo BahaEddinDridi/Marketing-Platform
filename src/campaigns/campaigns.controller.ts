@@ -10,6 +10,7 @@ import {
   Req,
   Query,
   Res,
+  ParseArrayPipe,
 } from '@nestjs/common';
 import { CampaignsService, LinkedInCampaignInput } from './campaigns.service';
 import { CreateCampaignDto } from './dto/create-campaign.dto';
@@ -37,9 +38,9 @@ interface AudienceCountRequest {
 
 @Controller('campaigns')
 export class CampaignsController {
-  constructor(private readonly campaignsService: CampaignsService,
-    private readonly linkedinCampaignsService: LinkedInCampaignsService
-
+  constructor(
+    private readonly campaignsService: CampaignsService,
+    private readonly linkedinCampaignsService: LinkedInCampaignsService,
   ) {}
 
   @Post()
@@ -49,24 +50,59 @@ export class CampaignsController {
   }
 
   @Get()
-@UseGuards(JwtAuthGuard)
-findAll(
-  @Query('page') page: string,
-  @Query('pageSize') pageSize: string,
-  @Query('campaignGroupId') campaignGroupId?: string,
-  @Query('objective') objective?: string,
-  @Query('status') status?: string,
-  @Query('search') search?: string,
-) {
-  return this.campaignsService.findAll(
-    parseInt(page) || 1,
-    parseInt(pageSize) || 10,
-    campaignGroupId,
-    objective as ObjectiveType,
-    status as CampaignStatus,
-    search,
-  );
-}
+  @UseGuards(JwtAuthGuard)
+  async listLinkedInCampaigns(
+    @Query('search') search?: string,
+    @Query(
+      'status',
+      new ParseArrayPipe({ items: String, optional: true, separator: ',' }),
+    )
+    status?: string[],
+    @Query(
+      'objective',
+      new ParseArrayPipe({ items: String, optional: true, separator: ',' }),
+    )
+    objective?: string[],
+    @Query(
+      'campaignGroupId',
+      new ParseArrayPipe({ items: String, optional: true, separator: ',' }),
+    )
+    campaignGroupId?: string[],
+    @Query('startDateFrom') startDateFrom?: string,
+    @Query('startDateTo') startDateTo?: string,
+    @Query('endDateFrom') endDateFrom?: string,
+    @Query('endDateTo') endDateTo?: string,
+    @Query('minDailyBudget') minDailyBudget?: number,
+    @Query('maxDailyBudget') maxDailyBudget?: number,
+    @Query('minLifetimeBudget') minLifetimeBudget?: number,
+    @Query('maxLifetimeBudget') maxLifetimeBudget?: number,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortOrder') sortOrder?: 'asc' | 'desc',
+  ) {
+    return this.campaignsService.findAll({
+      search,
+      status: status && status.length > 0 ? status : undefined,
+      objective: objective && objective.length > 0 ? objective : undefined,
+      campaignGroupId:
+        campaignGroupId && campaignGroupId.length > 0
+          ? campaignGroupId
+          : undefined,
+      startDateFrom: startDateFrom ? new Date(startDateFrom) : undefined,
+      startDateTo: startDateTo ? new Date(startDateTo) : undefined,
+      endDateFrom: endDateFrom ? new Date(endDateFrom) : undefined,
+      endDateTo: endDateTo ? new Date(endDateTo) : undefined,
+      minDailyBudget,
+      maxDailyBudget,
+      minLifetimeBudget,
+      maxLifetimeBudget,
+      page,
+      limit,
+      sortBy,
+      sortOrder,
+    });
+  }
 
   @Get(':id')
   @UseGuards(JwtAuthGuard)
@@ -315,14 +351,15 @@ findAll(
     };
   }
 
-    @Get(':campaignId/report/pdf')
+  @Get(':campaignId/report/pdf')
   @UseGuards(JwtAuthGuard)
   async downloadCampaignReport(
     @Param('campaignId') campaignId: string,
     @Res() res: Response,
   ) {
     try {
-      const pdfBuffer = await this.linkedinCampaignsService.createPdfReport(campaignId);
+      const pdfBuffer =
+        await this.linkedinCampaignsService.createPdfReport(campaignId);
       res.set({
         'Content-Type': 'application/pdf',
         'Content-Disposition': `attachment; filename=campaign-report-${campaignId}.pdf`,
