@@ -374,4 +374,24 @@ export class CampaignsController {
       });
     }
   }
+  @Patch(':campaignId/status')
+  @UseGuards(JwtAuthGuard)
+  async updateCampaignStatus(
+    @Req() req: AuthenticatedRequest,
+    @Param('campaignId') campaignId: string,
+    @Body()
+    body: { status: string; platformName: 'LinkedIn' | 'Google' | 'Meta' },
+  ) {
+    const user = req.user as { user_id: string; orgId: string };
+    const result = await this.campaignsService.updateCampaignStatus(
+      campaignId,
+      body.status,
+      body.platformName,
+      user.orgId,
+    );
+    return {
+      success: result.success,
+      message: result.message,
+    };
+  }
 }

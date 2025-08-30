@@ -27,6 +27,7 @@ import {
 import pLimit from 'p-limit';
 import { LinkedInAdsService } from './linkedin/linkedinAds.service';
 import { format } from 'path';
+import { NotificationsService } from 'src/notifications/notifications.service';
 
 const mapToPrismaEnum = <T extends Record<string, string>>(
   value: string,
@@ -184,6 +185,7 @@ export class CampaignsService {
     private readonly authService: AuthService,
     private readonly linkedinService: LinkedInService,
     private readonly linkedInAdsService: LinkedInAdsService,
+    private readonly notificationService: NotificationsService,
 
     private readonly configService: ConfigService,
   ) {}
@@ -192,190 +194,208 @@ export class CampaignsService {
     return this.prisma.marketingCampaign.create({ data: createCampaignDto });
   }
 
- async findAll(filters: {
-  search?: string;
-  status?: string | string[];
-  objective?: string | string[];
-  campaignGroupId?: string | string[];
-  startDateFrom?: Date;
-  startDateTo?: Date;
-  endDateFrom?: Date;
-  endDateTo?: Date;
-  minDailyBudget?: number;
-  maxDailyBudget?: number;
-  minLifetimeBudget?: number;
-  maxLifetimeBudget?: number;
-  page?: number;
-  limit?: number;
-  sortBy?: string;
-  sortOrder?: 'asc' | 'desc';
-} = {}) {
-  this.logger.log('Fetching LinkedIn campaigns from database with filters:', filters);
-
-  try {
-    // Validate date ranges
-    if (filters.startDateFrom && filters.startDateTo && filters.startDateFrom > filters.startDateTo) {
-      throw new Error('startDateFrom must be before or equal to startDateTo');
-    }
-    if (filters.endDateFrom && filters.endDateTo && filters.endDateFrom > filters.endDateTo) {
-      throw new Error('endDateFrom must be before or equal to endDateTo');
-    }
-
-    // Initialize where clause
-    const where: any = {};
-
-    // Add filters if provided
-    if (filters.status) {
-      where.status = Array.isArray(filters.status)
-        ? { in: filters.status }
-        : { in: [filters.status] };
-    }
-
-    if (filters.search) {
-      where.OR = [
-        { campaign_name: { contains: filters.search, mode: 'insensitive' } },
-        { campaign_id: { contains: filters.search, mode: 'insensitive' } },
-      ];
-    }
-
-    if (filters.objective) {
-      where.objective = Array.isArray(filters.objective)
-        ? { in: filters.objective }
-        : { in: [filters.objective] };
-    }
-
-    if (filters.campaignGroupId) {
-      where.campaign_group_id = Array.isArray(filters.campaignGroupId)
-        ? { in: filters.campaignGroupId }
-        : { in: [filters.campaignGroupId] };
-    }
-
-    // Date range filters
-    if (filters.startDateFrom || filters.startDateTo) {
-      where.start_date = {};
-      if (filters.startDateFrom) {
-        where.start_date.gte = filters.startDateFrom;
-      }
-      if (filters.startDateTo) {
-        where.start_date.lte = filters.startDateTo;
-      }
-    }
-
-    if (filters.endDateFrom || filters.endDateTo) {
-      where.end_date = {};
-      if (filters.endDateFrom) {
-        where.end_date.gte = filters.endDateFrom;
-      }
-      if (filters.endDateTo) {
-        where.end_date.lte = filters.endDateTo;
-      }
-    }
-
-    // Budget range filters
-    if (filters.minDailyBudget || filters.maxDailyBudget) {
-      where.budget = {};
-      if (filters.minDailyBudget) {
-        where.budget.gte = filters.minDailyBudget;
-      }
-      if (filters.maxDailyBudget) {
-        where.budget.lte = filters.maxDailyBudget;
-      }
-    }
-
-    if (filters.minLifetimeBudget || filters.maxLifetimeBudget) {
-      where.total_budget = {};
-      if (filters.minLifetimeBudget) {
-        where.total_budget.gte = filters.minLifetimeBudget;
-      }
-      if (filters.maxLifetimeBudget) {
-        where.total_budget.lte = filters.maxLifetimeBudget;
-      }
-    }
-
-    // Validate and calculate pagination
-    const page = Math.max(1, filters.page || 1);
-    const limit = Math.max(1, Math.min(100, filters.limit || 5)); // Cap limit to prevent abuse, default to 5 as original
-    const skip = (page - 1) * limit;
-
-    // Validate sortBy
-    const validSortFields = [
-      'created_at',
-      'updated_at',
-      'campaign_name',
-      'budget',
-      'total_budget',
-      'start_date',
-      'end_date',
-    ];
-    const sortBy = validSortFields.includes(filters.sortBy || '') ? filters.sortBy : 'updated_at';
-    const sortOrder = filters.sortOrder || 'desc';
-
-    // Execute query with pagination and sorting
-    const [campaigns, total] = await Promise.all([
-      this.prisma.marketingCampaign.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: {
-          [sortBy as string]: sortOrder,
-        },
-        include: {
-          platform: {
-            select: {
-              platform_id: true,
-              platform_name: true,
-              sync_status: true,
-            },
-          },
-          Ads: {
-            select: {
-              id: true,
-              name: true,
-              intendedStatus: true,
-              isServing: true,
-              reviewStatus: true,
-              createdAt: true,
-              lastModifiedAt: true,
-            },
-          },
-          CampaignGroup: {
-            select: {
-              id: true,
-              name: true,
-              status: true,
-            },
-          },
-          AdAccount: {
-            select: {
-              id: true,
-              name: true,
-              accountUrn: true,
-              status: true,
-            },
-          },
-        },
-      }),
-      this.prisma.marketingCampaign.count({ where }),
-    ]);
-
+  async findAll(
+    filters: {
+      search?: string;
+      status?: string | string[];
+      objective?: string | string[];
+      campaignGroupId?: string | string[];
+      startDateFrom?: Date;
+      startDateTo?: Date;
+      endDateFrom?: Date;
+      endDateTo?: Date;
+      minDailyBudget?: number;
+      maxDailyBudget?: number;
+      minLifetimeBudget?: number;
+      maxLifetimeBudget?: number;
+      page?: number;
+      limit?: number;
+      sortBy?: string;
+      sortOrder?: 'asc' | 'desc';
+    } = {},
+  ) {
     this.logger.log(
-      `Fetched ${campaigns.length} LinkedIn campaigns from database (total: ${total})`,
+      'Fetching LinkedIn campaigns from database with filters:',
+      filters,
     );
 
-    return {
-      data: campaigns,
-      pagination: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
-    };
-  } catch (error: any) {
-    this.logger.error(`Failed to fetch LinkedIn campaigns: ${error.message}`, error.stack);
-    throw new Error(`Failed to fetch LinkedIn campaigns: ${error.message}`);
+    try {
+      // Validate date ranges
+      if (
+        filters.startDateFrom &&
+        filters.startDateTo &&
+        filters.startDateFrom > filters.startDateTo
+      ) {
+        throw new Error('startDateFrom must be before or equal to startDateTo');
+      }
+      if (
+        filters.endDateFrom &&
+        filters.endDateTo &&
+        filters.endDateFrom > filters.endDateTo
+      ) {
+        throw new Error('endDateFrom must be before or equal to endDateTo');
+      }
+
+      // Initialize where clause
+      const where: any = {};
+
+      // Add filters if provided
+      if (filters.status) {
+        where.status = Array.isArray(filters.status)
+          ? { in: filters.status }
+          : { in: [filters.status] };
+      }
+
+      if (filters.search) {
+        where.OR = [
+          { campaign_name: { contains: filters.search, mode: 'insensitive' } },
+          { campaign_id: { contains: filters.search, mode: 'insensitive' } },
+        ];
+      }
+
+      if (filters.objective) {
+        where.objective = Array.isArray(filters.objective)
+          ? { in: filters.objective }
+          : { in: [filters.objective] };
+      }
+
+      if (filters.campaignGroupId) {
+        where.campaign_group_id = Array.isArray(filters.campaignGroupId)
+          ? { in: filters.campaignGroupId }
+          : { in: [filters.campaignGroupId] };
+      }
+
+      // Date range filters
+      if (filters.startDateFrom || filters.startDateTo) {
+        where.start_date = {};
+        if (filters.startDateFrom) {
+          where.start_date.gte = filters.startDateFrom;
+        }
+        if (filters.startDateTo) {
+          where.start_date.lte = filters.startDateTo;
+        }
+      }
+
+      if (filters.endDateFrom || filters.endDateTo) {
+        where.end_date = {};
+        if (filters.endDateFrom) {
+          where.end_date.gte = filters.endDateFrom;
+        }
+        if (filters.endDateTo) {
+          where.end_date.lte = filters.endDateTo;
+        }
+      }
+
+      // Budget range filters
+      if (filters.minDailyBudget || filters.maxDailyBudget) {
+        where.budget = {};
+        if (filters.minDailyBudget) {
+          where.budget.gte = filters.minDailyBudget;
+        }
+        if (filters.maxDailyBudget) {
+          where.budget.lte = filters.maxDailyBudget;
+        }
+      }
+
+      if (filters.minLifetimeBudget || filters.maxLifetimeBudget) {
+        where.total_budget = {};
+        if (filters.minLifetimeBudget) {
+          where.total_budget.gte = filters.minLifetimeBudget;
+        }
+        if (filters.maxLifetimeBudget) {
+          where.total_budget.lte = filters.maxLifetimeBudget;
+        }
+      }
+
+      // Validate and calculate pagination
+      const page = Math.max(1, filters.page || 1);
+      const limit = Math.max(1, Math.min(100, filters.limit || 5)); // Cap limit to prevent abuse, default to 5 as original
+      const skip = (page - 1) * limit;
+
+      // Validate sortBy
+      const validSortFields = [
+        'created_at',
+        'updated_at',
+        'campaign_name',
+        'budget',
+        'total_budget',
+        'start_date',
+        'end_date',
+      ];
+      const sortBy = validSortFields.includes(filters.sortBy || '')
+        ? filters.sortBy
+        : 'updated_at';
+      const sortOrder = filters.sortOrder || 'desc';
+
+      // Execute query with pagination and sorting
+      const [campaigns, total] = await Promise.all([
+        this.prisma.marketingCampaign.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: {
+            [sortBy as string]: sortOrder,
+          },
+          include: {
+            platform: {
+              select: {
+                platform_id: true,
+                platform_name: true,
+                sync_status: true,
+              },
+            },
+            Ads: {
+              select: {
+                id: true,
+                name: true,
+                intendedStatus: true,
+                isServing: true,
+                reviewStatus: true,
+                createdAt: true,
+                lastModifiedAt: true,
+              },
+            },
+            CampaignGroup: {
+              select: {
+                id: true,
+                name: true,
+                status: true,
+              },
+            },
+            AdAccount: {
+              select: {
+                id: true,
+                name: true,
+                accountUrn: true,
+                status: true,
+              },
+            },
+          },
+        }),
+        this.prisma.marketingCampaign.count({ where }),
+      ]);
+
+      this.logger.log(
+        `Fetched ${campaigns.length} LinkedIn campaigns from database (total: ${total})`,
+      );
+
+      return {
+        data: campaigns,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+        },
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to fetch LinkedIn campaigns: ${error.message}`,
+        error.stack,
+      );
+      throw new Error(`Failed to fetch LinkedIn campaigns: ${error.message}`);
+    }
   }
-}
 
   async findOne(campaign_id: string): Promise<CampaignResponse | null> {
     return this.prisma.marketingCampaign.findUnique({
@@ -428,8 +448,6 @@ export class CampaignsService {
   async remove(id: string) {
     return this.prisma.marketingCampaign.delete({ where: { campaign_id: id } });
   }
-
- 
 
   async fetchLinkedInCampaigns(adAccountIds: string[]): Promise<any[]> {
     this.logger.log(
@@ -541,108 +559,120 @@ export class CampaignsService {
       throw new Error('LinkedIn metadata not configured');
     }
 
-    // Type guard to check if a JsonValue is an array of { value: string; name: string }
-    const isMetadataArray = (
-      data: JsonValue,
-    ): data is { value: string; name: string }[] => {
-      return (
-        Array.isArray(data) &&
-        data.every(
-          (item) =>
-            typeof item === 'object' &&
-            item !== null &&
-            'value' in item &&
-            'name' in item &&
-            typeof item.value === 'string' &&
-            typeof item.name === 'string',
-        )
-      );
-    };
+    // Fetch existing campaigns to preserve ad_account_id and campaign_group_id
+    const existingCampaigns = await this.prisma.marketingCampaign.findMany({
+      where: {
+        external_id: {
+          in: campaigns
+            .map((c) => c.id?.toString())
+            .filter((id): id is string => !!id),
+        },
+      },
+      select: {
+        external_id: true,
+        ad_account_id: true,
+        campaign_group_id: true,
+      },
+    });
 
-    // Create lookup maps for URNs to names with type safety (exclude locations)
-    const metadataMaps: { [key: string]: Map<string, string> } = {
-      industries: new Map(
-        isMetadataArray(metadata.targeting_industries)
-          ? metadata.targeting_industries.map((item) => [item.value, item.name])
-          : [],
-      ),
-      titles: new Map(
-        isMetadataArray(metadata.targeting_titles)
-          ? metadata.targeting_titles.map((item) => [item.value, item.name])
-          : [],
-      ),
-      interfaceLocales: new Map(
-        isMetadataArray(metadata.targeting_locales)
-          ? metadata.targeting_locales.map((item) => [item.value, item.name])
-          : [],
-      ),
-      locations: new Map(
-        isMetadataArray(metadata.targeting_locations)
-          ? metadata.targeting_locations.map((item) => [item.value, item.name])
-          : [],
-      ),
-      seniorities: new Map(
-        isMetadataArray(metadata.targeting_seniorities)
-          ? metadata.targeting_seniorities.map((item) => [
-              item.value,
-              item.name,
-            ])
-          : [],
-      ),
-      staffCountRanges: new Map(
-        isMetadataArray(metadata.targeting_staff_count_ranges)
-          ? metadata.targeting_staff_count_ranges.map((item) => [
-              item.value,
-              item.name,
-            ])
-          : [],
-      ),
-    };
+    const campaignMap = new Map(
+      existingCampaigns.map((c) => [
+        c.external_id,
+        {
+          ad_account_id: c.ad_account_id,
+          campaign_group_id: c.campaign_group_id,
+        },
+      ]),
+    );
+
+    // Fetch campaign groups for URN-to-ID mapping
+    const config = await this.prisma.linkedInCampaignConfig.findUnique({
+      where: { orgId: 'single-org' },
+      include: { campaignGroups: true },
+    });
+    const campaignGroupMap = new Map(
+      config?.campaignGroups.map((group) => [
+        group.urn?.split(':').pop(),
+        group.id,
+      ]) || [],
+    );
 
     const mappedCampaigns = campaigns.map((campaign) => {
-      // Transform targetingCriteria
+      const existing = campaignMap.get(campaign.id?.toString());
+      this.logger.log(`Processing campaign ${campaign.id}:`, {
+        campaignAdAccountId: campaign.adAccountId,
+        existingAdAccountId: existing?.ad_account_id,
+        campaignGroup: campaign.campaignGroup,
+        existingCampaignGroupId: existing?.campaign_group_id,
+    });
+      if (!campaign.campaignGroup) {
+        this.logger.warn(
+          `Campaign ${campaign.id} has no campaignGroup in API response`,
+          { campaign },
+        );
+      } else if (
+        !campaign.campaignGroup.includes('urn:li:sponsoredCampaignGroup:')
+      ) {
+        this.logger.warn(
+          `Campaign ${campaign.id} has invalid campaignGroup URN: ${campaign.campaignGroup}`,
+          { campaign },
+        );
+      }
+
+      // Map targetingCriteria (unchanged from original)
       let transformedData = {};
       if (campaign.targetingCriteria) {
         const transformFacet = (facetData: any, facetUrn: string): any => {
-          const facetKey = facetUrn.split(':').pop() || facetUrn; // e.g., "industries"
-
-          const map = metadataMaps[facetKey];
+          const facetKey = facetUrn.split(':').pop() || facetUrn;
+          const map = metadata[facetKey];
           if (!map) {
             this.logger.warn(`No metadata map for facet: ${facetKey}`);
-            return facetData; // Return unchanged if no metadata
+            return facetData;
           }
           return facetData.map((urn: string) => ({
             urn,
-            name: map.get(urn) || 'Unknown',
+            name:
+              map.find((item: any) => item.value === urn)?.name || 'Unknown',
           }));
         };
 
-        const transformedCriteria = {
-          include: campaign.targetingCriteria.include
-            ? {
-                and: campaign.targetingCriteria.include.and.map(
-                  (andClause: any) => ({
-                    or: Object.fromEntries(
-                      Object.entries(andClause.or).map(([facetUrn, urns]) => [
-                        facetUrn, // Keep full URN, e.g., "urn:li:adTargetingFacet:industries"
-                        transformFacet(urns, facetUrn),
-                      ]),
-                    ),
-                  }),
-                ),
-              }
-            : undefined,
+        transformedData = {
+          targetingCriteria: {
+            include: campaign.targetingCriteria.include
+              ? {
+                  and: campaign.targetingCriteria.include.and.map(
+                    (andClause: any) => ({
+                      or: Object.fromEntries(
+                        Object.entries(andClause.or).map(([facetUrn, urns]) => [
+                          facetUrn,
+                          transformFacet(urns, facetUrn),
+                        ]),
+                      ),
+                    }),
+                  ),
+                }
+              : undefined,
+          },
         };
-
-        transformedData = { targetingCriteria: transformedCriteria };
       }
 
+      const campaignGroupIdRaw = campaign.campaignGroup?.split(':').pop();
+      let campaignGroupId: string | null = null;
+
+      if (campaignGroupIdRaw && campaignGroupMap.has(campaignGroupIdRaw)) {
+        const mappedId = campaignGroupMap.get(campaignGroupIdRaw);
+        campaignGroupId = mappedId !== undefined ? mappedId : null;
+      } else if (existing?.campaign_group_id) {
+        campaignGroupId = existing.campaign_group_id;
+      }
+
+      const adAccountId = campaign.adAccountId || existing?.ad_account_id;
       return {
         campaign_name: campaign.name || 'Unnamed Campaign',
         platform_id: platform.platform_id,
         external_id: campaign.id?.toString(),
-        ad_account_id: campaign.adAccountId,
-        campaign_group_id: campaign.campaignGroup?.split(':').pop(),
+        ad_account_id: adAccountId,
+        campaign_group_id: campaignGroupId,
         associated_entity: campaign.associatedEntity?.split(':').pop() || null,
         objective: campaign.objectiveType
           ? mapToPrismaEnum(campaign.objectiveType, ObjectiveType, null)
@@ -665,7 +695,7 @@ export class CampaignsService {
               campaign.status,
               CampaignStatus,
               CampaignStatus.DRAFT,
-            ) as CampaignStatus) // Ensure non-null
+            ) as CampaignStatus)
           : CampaignStatus.DRAFT,
         creative_selection: campaign.creativeSelection || null,
         serving_statuses: Array.isArray(campaign.servingStatuses)
@@ -714,8 +744,12 @@ export class CampaignsService {
         update: {
           campaign_name: campaign.campaign_name,
           platform_id: campaign.platform_id,
-          ad_account_id: campaign.ad_account_id,
-          campaign_group_id: campaign.campaign_group_id,
+          ...(campaign.ad_account_id
+            ? { ad_account_id: campaign.ad_account_id }
+            : {}),
+          ...(campaign.campaign_group_id
+            ? { campaign_group_id: campaign.campaign_group_id }
+            : {}),
           associated_entity: campaign.associated_entity,
           objective: campaign.objective
             ? { set: campaign.objective }
@@ -3554,6 +3588,112 @@ export class CampaignsService {
       throw new BadRequestException(
         error.message || 'Failed to fetch audience count',
       );
+    }
+  }
+
+  async updateCampaignStatus(
+    campaignId: string,
+    status: string,
+    platformName: 'LinkedIn' | 'Google' | 'Meta',
+    orgId: string,
+  ): Promise<{ success: boolean; message: string }> {
+    this.logger.log(
+      `Updating campaign status for campaignId: ${campaignId}, platform: ${platformName}, status: ${status}`,
+    );
+
+    try {
+      const validStatuses: { [key: string]: string[] } = {
+        LinkedIn: ['ACTIVE', 'PAUSED', 'DRAFT', 'PENDING_DELETION', 'ARCHIVED'],
+        Google: ['ENABLED', 'PAUSED'],
+        Meta: ['ACTIVE', 'PAUSED'],
+      };
+
+      if (!validStatuses[platformName].includes(status)) {
+        this.logger.error(
+          `Invalid status '${status}' for platform ${platformName}. Valid statuses: ${validStatuses[platformName].join(', ')}`,
+        );
+        throw new BadRequestException(
+          `Invalid status '${status}' for platform ${platformName}`,
+        );
+      }
+
+      if (platformName === 'LinkedIn') {
+        await this.prisma.marketingCampaign.update({
+          where: { campaign_id: campaignId },
+          data: {
+            status: status as CampaignStatus,
+            updated_at: new Date(),
+          },
+        });
+      } else if (platformName === 'Google') {
+        await this.prisma.googleCampaign.update({
+          where: { campaign_id: campaignId },
+          data: {
+            status: status as 'ENABLED' | 'PAUSED',
+            updated_at: new Date(),
+          },
+        });
+      } else if (platformName === 'Meta') {
+        await this.prisma.metaCampaign.update({
+          where: { campaign_id: campaignId },
+          data: {
+            status: status as 'ACTIVE' | 'PAUSED',
+            updated_at: new Date(),
+          },
+        });
+      } else {
+        this.logger.error(`Unsupported platform: ${platformName}`);
+        throw new BadRequestException(`Unsupported platform: ${platformName}`);
+      }
+
+      // Determine notification type and content based on status
+      const isLaunched = status === 'ACTIVE' || status === 'ENABLED';
+      const isPaused = status === 'PAUSED';
+
+      if (isLaunched || isPaused) {
+        const notificationType = isLaunched
+          ? 'receiveCampaignLaunched'
+          : 'receiveCampaignPaused';
+        const actionText = isLaunched ? 'launched' : 'paused';
+        const successType = isLaunched
+          ? 'success: campaign launched'
+          : 'success: campaign paused';
+
+        await this.notificationService.notifyUsersOfOrg(
+          orgId,
+          notificationType,
+          {
+            title: `${platformName} Campaign ${isLaunched ? 'Launched' : 'Paused'}`,
+            message: `A ${platformName} campaign has been ${actionText}.`,
+            type: successType,
+            meta: { orgId, campaignId, url: 'http://localhost:3000/campaigns' },
+          },
+        );
+      }
+
+      this.logger.log(
+        `Successfully updated campaign status for campaignId: ${campaignId} to ${status} on platform ${platformName}`,
+      );
+
+      return {
+        success: true,
+        message: `Campaign status updated to ${status} successfully`,
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to update campaign status for campaignId: ${campaignId}, platform: ${platformName}: ${error.message}`,
+      );
+
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new BadRequestException(
+          `Campaign with id ${campaignId} not found`,
+        );
+      }
+
+      throw new Error(`Failed to update campaign status: ${error.message}`);
     }
   }
 }

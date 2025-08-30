@@ -1800,6 +1800,7 @@ export class LeadService {
           conversationId: conversation.conversationId,
           emails: conversation.emails.map((email) => ({
             id: email.id,
+            emailId: email.emailId,
             subject: email.subject,
             body: email.body,
             contentType: email.contentType,

@@ -51,7 +51,6 @@ export class NotificationsService {
       },
     });
 
-    this.logger.log("users", users)
     for (const user of users) {
       const notification = await this.prisma.notification.create({
         data: {

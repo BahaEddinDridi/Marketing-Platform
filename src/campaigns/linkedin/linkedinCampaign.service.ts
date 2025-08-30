@@ -156,7 +156,7 @@ export class LinkedInCampaignsService {
             title: 'LinkedIn Sync Successful',
             message: `LinkedIn campaigns were successfully synced for your organization.`,
             type: 'success: linkedin sync',
-            actionUrl: "http://localhost:3000/campaigns",
+            actionUrl: 'http://localhost:3000/campaigns',
             meta: { orgId, url: 'http://localhost:3000/campaigns' },
           },
         );
@@ -223,6 +223,25 @@ export class LinkedInCampaignsService {
   private async syncCampaignsAndAnalytics(orgId: string) {
     this.logger.log(`Syncing campaigns and analytics for org ${orgId}`);
 
+    this.logger.log('🔄 Checking if campaign relations need restoration...');
+  const campaignsNeedingFix = await this.prisma.marketingCampaign.count({
+    where: { OR: [{ ad_account_id: null }, { campaign_group_id: null }] },
+  });
+  
+  if (campaignsNeedingFix > 0) {
+    this.logger.log(`Found ${campaignsNeedingFix} campaigns with broken relations. Running restoration...`);
+    const restorationResult = await this.restoreCampaignRelations();
+    this.logger.log(`🔧 Restoration completed:`, restorationResult);
+    
+    if (!restorationResult.success) {
+      this.logger.error('❌ Restoration failed, but continuing with sync...');
+    } else {
+      this.logger.log(`✅ Successfully restored ${restorationResult.data.campaignsUpdated} campaigns`);
+    }
+  } else {
+    this.logger.log('✅ All campaigns have proper relations, skipping restoration');
+  }
+  
     const config = await this.prisma.linkedInCampaignConfig.findUnique({
       where: { orgId },
       include: {
@@ -255,6 +274,54 @@ export class LinkedInCampaignsService {
     if (!config.campaignGroups.length) {
       this.logger.log(`No campaign groups configured for org ${orgId}`);
       return;
+    }
+
+    this.logger.log(`Found ${config.campaignGroups.length} campaign groups`);
+
+    for (const group of config.campaignGroups) {
+      const adAccount = config.adAccounts.find(
+        (acc) => group.adAccountId === acc.id,
+      );
+
+      this.logger.log(`Campaign Group ${group.id}:`, {
+        name: group.name,
+        adAccountId: group.adAccountId,
+        hasAdAccount: !!adAccount,
+        totalCampaigns: group.campaigns?.length || 0,
+      });
+
+      if (group.campaigns?.length > 0) {
+        group.campaigns.forEach((campaign, index) => {
+          this.logger.log(`  Campaign ${index + 1}:`, {
+            external_id: campaign.external_id,
+            status: campaign.status,
+            objective: campaign.objective,
+            start_date: campaign.start_date,
+          });
+        });
+
+        const validCampaigns = group.campaigns.filter((campaign) =>
+          ['ACTIVE', 'PAUSED', 'DRAFT', 'COMPLETED'].includes(campaign.status),
+        );
+
+        this.logger.log(
+          `  Campaigns after status filter: ${validCampaigns.length}`,
+        );
+
+        const fullyValidCampaigns = validCampaigns.filter(
+          (campaign) =>
+            campaign.external_id !== null && campaign.objective !== null,
+        );
+
+        this.logger.log(
+          `  Campaigns after null filter: ${fullyValidCampaigns.length}`,
+        );
+      }
+
+      if (!adAccount) {
+        this.logger.warn(`No ad account found for campaign group ${group.id}`);
+        continue; // This line is causing the issue
+      }
     }
 
     const leadGenerationMetrics = [
@@ -308,17 +375,20 @@ export class LinkedInCampaignsService {
       }
 
       const validCampaigns = group.campaigns
-        .filter((campaign) =>
-          ['ACTIVE', 'PAUSED', 'DRAFT', 'COMPLETED'].includes(campaign.status),
-        )
-        .filter(
-          (
-            campaign,
-          ): campaign is any & {
-            external_id: string;
-            objective: ObjectiveType;
-          } => campaign.external_id !== null && campaign.objective !== null,
-        );
+        .filter((campaign) => {
+          this.logger.log(
+            `Campaign ${campaign.external_id} has status: ${campaign.status}`,
+          );
+          return campaign.status !== null; // Accept any non-null status temporarily
+        })
+        .filter((campaign) => {
+          const hasExternalId = campaign.external_id !== null;
+          const hasObjective = campaign.objective !== null;
+          this.logger.log(
+            `Campaign ${campaign.external_id}: hasExternalId=${hasExternalId}, hasObjective=${hasObjective}`,
+          );
+          return hasExternalId && hasObjective;
+        });
 
       if (validCampaigns.length === 0) {
         this.logger.log(`No active campaigns found for group ${group.id}`);
@@ -514,6 +584,13 @@ export class LinkedInCampaignsService {
       }
     }
 
+    const campaignsToFix = await this.prisma.marketingCampaign.count({
+      where: { OR: [{ ad_account_id: null }, { campaign_group_id: null }] },
+    });
+    if (campaignsToFix > 0) {
+      const result = await this.restoreCampaignRelations();
+      this.logger.log(`Restoration result: ${JSON.stringify(result)}`);
+    }
     // Update lastSyncedAt
     await this.prisma.linkedInCampaignConfig.update({
       where: { orgId },
@@ -528,6 +605,11 @@ export class LinkedInCampaignsService {
     this.logger.log(
       `Fetching LinkedIn campaigns by IDs: ${campaignIds.join(', ')} for ad account: ${adAccountId}`,
     );
+
+    if (!adAccountId) {
+      this.logger.error('adAccountId is missing or invalid');
+      throw new Error('Invalid adAccountId provided');
+    }
 
     const accessToken = await this.linkedinService.getValidAccessToken();
     const headers = {
@@ -556,7 +638,7 @@ export class LinkedInCampaignsService {
       );
 
       // Construct batch request URL
-      const idsList = `List(${campaignIds.join(',')})`; // Join IDs without encoding
+      const idsList = `List(${campaignIds.join(',')})`;
       const params = { ids: idsList };
 
       const response = await axios.get<{
@@ -570,12 +652,20 @@ export class LinkedInCampaignsService {
         },
       );
 
-      const fetchedCampaigns = Object.values(response.data.results || {}).map(
-        (campaign) => ({
+      const fetchedCampaigns = Object.values(response.data.results || {})
+        .map((campaign) => ({
           ...campaign,
           adAccountId,
-        }),
-      );
+        }))
+        .filter((campaign) => {
+          if (!campaign.id) {
+            this.logger.warn(
+              `Skipping campaign with missing ID: ${JSON.stringify(campaign)}`,
+            );
+            return false;
+          }
+          return true;
+        });
 
       this.logger.log(
         `Fetched ${fetchedCampaigns.length} campaigns for ad account ${adAccountId}`,
@@ -598,13 +688,13 @@ export class LinkedInCampaignsService {
         return;
       }
 
-      // Save filtered campaigns using existing method
+      // Save filtered campaigns
       await this.campaignsService.saveLinkedInCampaigns(campaignsToSync);
       this.logger.log(
         `Synced ${campaignsToSync.length} campaigns with updated versions`,
       );
 
-      // Optionally trigger ad sync
+      // Trigger ad sync
       this.logger.log('Initiating ad sync for updated campaigns');
       await this.linkedInAdsService.syncCampaignAds();
     } catch (error: any) {
@@ -636,7 +726,6 @@ export class LinkedInCampaignsService {
       throw new Error('Failed to fetch and sync LinkedIn campaigns');
     }
   }
-
   async createOrUpdateLinkedInCampaignConfig(
     orgId: string,
     config: {
@@ -788,20 +877,22 @@ export class LinkedInCampaignsService {
     }
   }
 
-  async generateCampaignPerformanceReport(campaignId: string): Promise<PerformanceReport> {
+  async generateCampaignPerformanceReport(
+    campaignId: string,
+  ): Promise<PerformanceReport> {
     this.logger.log(`Generating performance report for campaign ${campaignId}`);
 
     // Fetch campaign details
     const campaign = await this.prisma.marketingCampaign.findUnique({
-    where: { campaign_id: campaignId },
-    select: {
-      campaign_id: true,
-      campaign_name: true,
-      objective: true,
-      start_date: true,
-      status: true,
-    },
-  });
+      where: { campaign_id: campaignId },
+      select: {
+        campaign_id: true,
+        campaign_name: true,
+        objective: true,
+        start_date: true,
+        status: true,
+      },
+    });
 
     if (!campaign) {
       this.logger.error(`Campaign with ID ${campaignId} not found`);
@@ -809,7 +900,10 @@ export class LinkedInCampaignsService {
     }
 
     // Fetch analytics data
-const { allAnalytics, dailyAnalytics } = await this.linkedInAnalyticsService.getCampaignAnalyticsByCampaignId(campaignId);
+    const { allAnalytics, dailyAnalytics } =
+      await this.linkedInAnalyticsService.getCampaignAnalyticsByCampaignId(
+        campaignId,
+      );
     // Determine metrics based on campaign objective
     const isLeadGen = campaign.objective === 'LEAD_GENERATION';
     const metrics = isLeadGen
@@ -839,34 +933,37 @@ const { allAnalytics, dailyAnalytics } = await this.linkedInAnalyticsService.get
         ];
 
     // Extract latest ALL granularity analytics
-const latestAllAnalytics = allAnalytics.sort((a, b) => b.dateFetched.getTime() - a.dateFetched.getTime())[0];
+    const latestAllAnalytics = allAnalytics.sort(
+      (a, b) => b.dateFetched.getTime() - a.dateFetched.getTime(),
+    )[0];
     // Format daily analytics
     const dailyPerformance = dailyAnalytics.map((analytics) => ({
-    date: analytics.datePeriodStart.toISOString().split('T')[0],
-    impressions: analytics.impressions ?? null,
-    clicks: analytics.clicks ?? null,
-    costInLocalCurrency: analytics.costInLocalCurrency ?? null,
-    ...(isLeadGen
-      ? {
-          qualifiedLeads: analytics.qualifiedLeads ?? null,
-          costPerQualifiedLead: analytics.costPerQualifiedLead ?? null,
-          externalWebsiteConversions: analytics.externalWebsiteConversions ?? null,
-          landingPageClicks: analytics.landingPageClicks ?? null,
-          reactions: analytics.reactions ?? null,
-          shares: analytics.shares ?? null,
-          follows: analytics.follows ?? null,
-        }
-      : {
-          videoViews: analytics.videoViews ?? null,
-          videoCompletions: analytics.videoCompletions ?? null,
-          reactions: analytics.reactions ?? null,
-          shares: analytics.shares ?? null,
-          comments: analytics.comments ?? null,
-          follows: analytics.follows ?? null,
-          averageDwellTime: analytics.averageDwellTime ?? null,
-          cardClicks: analytics.cardClicks ?? null,
-        }),
-  }));
+      date: analytics.datePeriodStart.toISOString().split('T')[0],
+      impressions: analytics.impressions ?? null,
+      clicks: analytics.clicks ?? null,
+      costInLocalCurrency: analytics.costInLocalCurrency ?? null,
+      ...(isLeadGen
+        ? {
+            qualifiedLeads: analytics.qualifiedLeads ?? null,
+            costPerQualifiedLead: analytics.costPerQualifiedLead ?? null,
+            externalWebsiteConversions:
+              analytics.externalWebsiteConversions ?? null,
+            landingPageClicks: analytics.landingPageClicks ?? null,
+            reactions: analytics.reactions ?? null,
+            shares: analytics.shares ?? null,
+            follows: analytics.follows ?? null,
+          }
+        : {
+            videoViews: analytics.videoViews ?? null,
+            videoCompletions: analytics.videoCompletions ?? null,
+            reactions: analytics.reactions ?? null,
+            shares: analytics.shares ?? null,
+            comments: analytics.comments ?? null,
+            follows: analytics.follows ?? null,
+            averageDwellTime: analytics.averageDwellTime ?? null,
+            cardClicks: analytics.cardClicks ?? null,
+          }),
+    }));
 
     // Construct prompt
     const prompt = this.buildPerformanceReportPrompt(
@@ -895,12 +992,17 @@ const latestAllAnalytics = allAnalytics.sort((a, b) => b.dateFetched.getTime() -
         top_p: 0.9,
       });
 
-      this.logger.log('Raw Groq response for performance report:', JSON.stringify(response, null, 2));
+      this.logger.log(
+        'Raw Groq response for performance report:',
+        JSON.stringify(response, null, 2),
+      );
 
       const content = response.choices[0]?.message?.content?.trim();
       if (!content) {
         this.logger.error('No content in Groq response');
-        throw new InternalServerErrorException('Failed to generate performance report');
+        throw new InternalServerErrorException(
+          'Failed to generate performance report',
+        );
       }
 
       let report;
@@ -908,90 +1010,105 @@ const latestAllAnalytics = allAnalytics.sort((a, b) => b.dateFetched.getTime() -
         report = JSON.parse(content);
       } catch (error) {
         this.logger.error(`Failed to parse Groq response as JSON: ${content}`);
-        throw new InternalServerErrorException('Invalid response format from AI');
+        throw new InternalServerErrorException(
+          'Invalid response format from AI',
+        );
       }
 
       // Validate report structure
       if (!report.performanceSummary || !report.recommendedActions) {
         this.logger.error('Invalid report structure from AI');
-        throw new InternalServerErrorException('Generated report is incomplete');
+        throw new InternalServerErrorException(
+          'Generated report is incomplete',
+        );
       }
 
       const defaultKeyMetrics = {
-      impressions: null,
-      clicks: null,
-      costInLocalCurrency: null,
-      ...(isLeadGen
-        ? {
-            qualifiedLeads: null,
-            costPerQualifiedLead: null,
-            externalWebsiteConversions: null,
-            landingPageClicks: null,
-            reactions: null,
-            shares: null,
-            follows: null,
-          }
-        : {
-            videoViews: null,
-            videoCompletions: null,
-            reactions: null,
-            shares: null,
-            comments: null,
-            follows: null,
-            averageDwellTime: null,
-            cardClicks: null,
-          }),
-    };
+        impressions: null,
+        clicks: null,
+        costInLocalCurrency: null,
+        ...(isLeadGen
+          ? {
+              qualifiedLeads: null,
+              costPerQualifiedLead: null,
+              externalWebsiteConversions: null,
+              landingPageClicks: null,
+              reactions: null,
+              shares: null,
+              follows: null,
+            }
+          : {
+              videoViews: null,
+              videoCompletions: null,
+              reactions: null,
+              shares: null,
+              comments: null,
+              follows: null,
+              averageDwellTime: null,
+              cardClicks: null,
+            }),
+      };
 
       return {
-      campaignId: campaign.campaign_id,
-      campaignName: campaign.campaign_name ?? 'Unnamed Campaign',
-      performanceSummary: {
-        overview: report.performanceSummary.overview,
-        keyMetrics: latestAllAnalytics
-          ? {
-              impressions: latestAllAnalytics.impressions ?? null,
-              clicks: latestAllAnalytics.clicks ?? null,
-              costInLocalCurrency: latestAllAnalytics.costInLocalCurrency ?? null,
-              ...(isLeadGen
-                ? {
-                    qualifiedLeads: latestAllAnalytics.qualifiedLeads ?? null,
-                    costPerQualifiedLead: latestAllAnalytics.costPerQualifiedLead ?? null,
-                    externalWebsiteConversions: latestAllAnalytics.externalWebsiteConversions ?? null,
-                    landingPageClicks: latestAllAnalytics.landingPageClicks ?? null,
-                    reactions: latestAllAnalytics.reactions ?? null,
-                    shares: latestAllAnalytics.shares ?? null,
-                    follows: latestAllAnalytics.follows ?? null,
-                  }
-                : {
-                    videoViews: latestAllAnalytics.videoViews ?? null,
-                    videoCompletions: latestAllAnalytics.videoCompletions ?? null,
-                    reactions: latestAllAnalytics.reactions ?? null,
-                    shares: latestAllAnalytics.shares ?? null,
-                    comments: latestAllAnalytics.comments ?? null,
-                    follows: latestAllAnalytics.follows ?? null,
-                    averageDwellTime: latestAllAnalytics.averageDwellTime ?? null,
-                    cardClicks: latestAllAnalytics.cardClicks ?? null,
-                  }),
-            }
-          : defaultKeyMetrics,
-        trends: { dailyPerformance },
-      },
-      recommendedActions: report.recommendedActions,
-    };
-  } catch (error: any) {
-    this.logger.error(`Failed to generate performance report: ${error.message}`, {
-      stack: error.stack,
-    });
-    if (error.response?.status === 401) {
-      throw new UnauthorizedException('Invalid Groq API key');
+        campaignId: campaign.campaign_id,
+        campaignName: campaign.campaign_name ?? 'Unnamed Campaign',
+        performanceSummary: {
+          overview: report.performanceSummary.overview,
+          keyMetrics: latestAllAnalytics
+            ? {
+                impressions: latestAllAnalytics.impressions ?? null,
+                clicks: latestAllAnalytics.clicks ?? null,
+                costInLocalCurrency:
+                  latestAllAnalytics.costInLocalCurrency ?? null,
+                ...(isLeadGen
+                  ? {
+                      qualifiedLeads: latestAllAnalytics.qualifiedLeads ?? null,
+                      costPerQualifiedLead:
+                        latestAllAnalytics.costPerQualifiedLead ?? null,
+                      externalWebsiteConversions:
+                        latestAllAnalytics.externalWebsiteConversions ?? null,
+                      landingPageClicks:
+                        latestAllAnalytics.landingPageClicks ?? null,
+                      reactions: latestAllAnalytics.reactions ?? null,
+                      shares: latestAllAnalytics.shares ?? null,
+                      follows: latestAllAnalytics.follows ?? null,
+                    }
+                  : {
+                      videoViews: latestAllAnalytics.videoViews ?? null,
+                      videoCompletions:
+                        latestAllAnalytics.videoCompletions ?? null,
+                      reactions: latestAllAnalytics.reactions ?? null,
+                      shares: latestAllAnalytics.shares ?? null,
+                      comments: latestAllAnalytics.comments ?? null,
+                      follows: latestAllAnalytics.follows ?? null,
+                      averageDwellTime:
+                        latestAllAnalytics.averageDwellTime ?? null,
+                      cardClicks: latestAllAnalytics.cardClicks ?? null,
+                    }),
+              }
+            : defaultKeyMetrics,
+          trends: { dailyPerformance },
+        },
+        recommendedActions: report.recommendedActions,
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to generate performance report: ${error.message}`,
+        {
+          stack: error.stack,
+        },
+      );
+      if (error.response?.status === 401) {
+        throw new UnauthorizedException('Invalid Groq API key');
+      }
+      if (error.response?.status === 429) {
+        throw new InternalServerErrorException('Groq rate limit exceeded');
+      }
+      throw new InternalServerErrorException(
+        'Failed to generate performance report',
+      );
     }
-    if (error.response?.status === 429) {
-      throw new InternalServerErrorException('Groq rate limit exceeded');
-    }
-    throw new InternalServerErrorException('Failed to generate performance report');
   }
-}
 
   private buildPerformanceReportPrompt(
     campaign: {
@@ -1010,7 +1127,8 @@ const latestAllAnalytics = allAnalytics.sort((a, b) => b.dateFetched.getTime() -
   ): string {
     const campaignName = campaign.campaign_name ?? 'Unnamed Campaign';
     const objective = campaign.objective ?? 'Unknown';
-    const startDate = campaign.start_date?.toISOString().split('T')[0] ?? 'Unknown';
+    const startDate =
+      campaign.start_date?.toISOString().split('T')[0] ?? 'Unknown';
     const status = campaign.status ?? 'Unknown';
     const isLeadGen = objective === 'LEAD_GENERATION';
 
@@ -1023,15 +1141,16 @@ const latestAllAnalytics = allAnalytics.sort((a, b) => b.dateFetched.getTime() -
           .join('\n')
       : 'No aggregate analytics available.';
 
-    const dailyPerformanceText = dailyPerformance.length > 0
-      ? dailyPerformance
-          .map((day) =>
-            Object.entries(day)
-              .map(([key, value]) => `${key}: ${value ?? 'N/A'}`)
-              .join(', '),
-          )
-          .join('\n')
-      : 'No daily performance data available.';
+    const dailyPerformanceText =
+      dailyPerformance.length > 0
+        ? dailyPerformance
+            .map((day) =>
+              Object.entries(day)
+                .map(([key, value]) => `${key}: ${value ?? 'N/A'}`)
+                .join(', '),
+            )
+            .join('\n')
+        : 'No daily performance data available.';
 
     return `You are an expert marketing analyst tasked with generating a detailed performance report for a LinkedIn advertising campaign. The report must be returned as a JSON object with the following structure:
 {
@@ -1078,168 +1197,142 @@ ${dailyPerformanceText}
 - Ensure all text fields are professional, concise, and relevant to LinkedIn advertising.`;
   }
 
+  async createPdfReport(campaignId: string): Promise<Buffer> {
+    // Generate the performance report
+    const report = await this.generateCampaignPerformanceReport(campaignId);
 
+    const pdfDoc = await PDFDocument.create();
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+    const fontSize = 12;
+    const headingSize = 16;
+    const subHeadingSize = 14;
+    const coverTitleSize = 24;
+    const coverSubtitleSize = 18;
 
+    // Define colors
+    const primaryColor = rgb(0, 0.2, 0.4); // Dark blue for headers and chart bars
+    const textColor = rgb(0, 0, 0); // Black for text
+    const borderColor = rgb(0.6, 0.6, 0.6); // Gray for table borders
+    const chartAxisColor = rgb(0.3, 0.3, 0.3); // Dark gray for chart axes
 
-async createPdfReport(campaignId: string): Promise<Buffer> {
-  // Generate the performance report
-  const report = await this.generateCampaignPerformanceReport(campaignId);
+    // Initialize page and dimensions
+    let page = pdfDoc.addPage([600, 800]);
+    let width = page.getSize().width;
+    let height = page.getSize().height;
+    let y = height - 200;
 
-  const pdfDoc = await PDFDocument.create();
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const fontSize = 12;
-  const headingSize = 16;
-  const subHeadingSize = 14;
-  const coverTitleSize = 24;
-  const coverSubtitleSize = 18;
-
-  // Define colors
-  const primaryColor = rgb(0, 0.2, 0.4); // Dark blue for headers and chart bars
-  const textColor = rgb(0, 0, 0); // Black for text
-  const borderColor = rgb(0.6, 0.6, 0.6); // Gray for table borders
-  const chartAxisColor = rgb(0.3, 0.3, 0.3); // Dark gray for chart axes
-
-  // Initialize page and dimensions
-  let page = pdfDoc.addPage([600, 800]);
-  let width = page.getSize().width;
-  let height = page.getSize().height;
-  let y = height - 200;
-
-  // Helper function to split text into lines
-  const splitTextIntoLines = (text: string, font: any, size: number, maxWidth: number): string[] => {
-    const words = text.split(' ');
-    const lines: string[] = [];
-    let currentLine = '';
-    for (const word of words) {
-      const testLine = currentLine ? `${currentLine} ${word}` : word;
-      if (font.widthOfTextAtSize(testLine, size) <= maxWidth) {
-        currentLine = testLine;
-      } else {
-        if (currentLine) lines.push(currentLine);
-        currentLine = word;
-      }
-    }
-    if (currentLine) lines.push(currentLine);
-    return lines;
-  };
-
-  // Helper function to add text and update y position
-  const addText = (
-    text: string,
-    options: {
-      size: number;
-      bold?: boolean;
-      maxWidth?: number;
-      lineHeight?: number;
-      x?: number;
-      y: number;
-      color?: any;
-    }
-  ) => {
-    const { size, bold = false, maxWidth = width - 100, lineHeight = size * 1.2, x = 50, y: textY, color = textColor } = options;
-    const textFont = bold ? boldFont : font;
-    const lines = text.split('\n');
-    let currentY = textY;
-    for (const line of lines) {
-      const wrappedLines = textFont.widthOfTextAtSize(line, size) > maxWidth
-        ? splitTextIntoLines(line, textFont, size, maxWidth)
-        : [line];
-      for (const wrappedLine of wrappedLines) {
-        if (currentY < 50) {
-          page = pdfDoc.addPage([600, 800]);
-          return { currentY: page.getSize().height - 50, newPage: true };
+    // Helper function to split text into lines
+    const splitTextIntoLines = (
+      text: string,
+      font: any,
+      size: number,
+      maxWidth: number,
+    ): string[] => {
+      const words = text.split(' ');
+      const lines: string[] = [];
+      let currentLine = '';
+      for (const word of words) {
+        const testLine = currentLine ? `${currentLine} ${word}` : word;
+        if (font.widthOfTextAtSize(testLine, size) <= maxWidth) {
+          currentLine = testLine;
+        } else {
+          if (currentLine) lines.push(currentLine);
+          currentLine = word;
         }
-        page.drawText(wrappedLine, {
-          x,
-          y: currentY,
-          font: textFont,
-          size,
-          color,
-        });
-        currentY -= lineHeight;
       }
-    }
-    currentY -= 10; // Extra spacing after paragraph
-    return { currentY, newPage: false };
-  };
+      if (currentLine) lines.push(currentLine);
+      return lines;
+    };
 
-  // Helper function to draw a table
-  const drawTable = (
-    headers: string[],
-    rows: string[][],
-    options: {
-      x: number;
-      y: number;
-      columnWidths: number[];
-      rowHeight: number;
-      fontSize: number;
-      boldHeader?: boolean;
-    }
-  ) => {
-    const { x, y: startY, columnWidths, rowHeight, fontSize, boldHeader = true } = options;
-    let currentY = startY;
+    // Helper function to add text and update y position
+    const addText = (
+      text: string,
+      options: {
+        size: number;
+        bold?: boolean;
+        maxWidth?: number;
+        lineHeight?: number;
+        x?: number;
+        y: number;
+        color?: any;
+      },
+    ) => {
+      const {
+        size,
+        bold = false,
+        maxWidth = width - 100,
+        lineHeight = size * 1.2,
+        x = 50,
+        y: textY,
+        color = textColor,
+      } = options;
+      const textFont = bold ? boldFont : font;
+      const lines = text.split('\n');
+      let currentY = textY;
+      for (const line of lines) {
+        const wrappedLines =
+          textFont.widthOfTextAtSize(line, size) > maxWidth
+            ? splitTextIntoLines(line, textFont, size, maxWidth)
+            : [line];
+        for (const wrappedLine of wrappedLines) {
+          if (currentY < 50) {
+            page = pdfDoc.addPage([600, 800]);
+            return { currentY: page.getSize().height - 50, newPage: true };
+          }
+          page.drawText(wrappedLine, {
+            x,
+            y: currentY,
+            font: textFont,
+            size,
+            color,
+          });
+          currentY -= lineHeight;
+        }
+      }
+      currentY -= 10; // Extra spacing after paragraph
+      return { currentY, newPage: false };
+    };
 
-    // Check if there's enough space for the table
-    if (currentY - (rowHeight * (rows.length + 1)) < 50) {
-      page = pdfDoc.addPage([600, 800]);
-      return { currentY: page.getSize().height - 50, newPage: true };
-    }
+    // Helper function to draw a table
+    const drawTable = (
+      headers: string[],
+      rows: string[][],
+      options: {
+        x: number;
+        y: number;
+        columnWidths: number[];
+        rowHeight: number;
+        fontSize: number;
+        boldHeader?: boolean;
+      },
+    ) => {
+      const {
+        x,
+        y: startY,
+        columnWidths,
+        rowHeight,
+        fontSize,
+        boldHeader = true,
+      } = options;
+      let currentY = startY;
 
-    // Draw header
-    headers.forEach((header, colIndex) => {
-      const cellX = x + columnWidths.slice(0, colIndex).reduce((sum, w) => sum + w, 0);
-      const wrappedLines = splitTextIntoLines(header, boldHeader ? boldFont : font, fontSize, columnWidths[colIndex] - 10);
-      page.drawRectangle({
-        x: cellX,
-        y: currentY - rowHeight,
-        width: columnWidths[colIndex],
-        height: rowHeight,
-        borderWidth: 1,
-        borderColor,
-        color: primaryColor,
-      });
-      page.drawText(wrappedLines[0] || header, {
-        x: cellX + 5,
-        y: currentY - fontSize - 5,
-        font: boldHeader ? boldFont : font,
-        size: fontSize,
-        color: rgb(1, 1, 1),
-      });
-    });
-    currentY -= rowHeight;
-
-    // Draw rows
-    for (const row of rows) {
-      if (currentY - rowHeight < 50) {
+      // Check if there's enough space for the table
+      if (currentY - rowHeight * (rows.length + 1) < 50) {
         page = pdfDoc.addPage([600, 800]);
-        // Redraw headers
-        headers.forEach((header, colIndex) => {
-          const cellX = x + columnWidths.slice(0, colIndex).reduce((sum, w) => sum + w, 0);
-          const wrappedLines = splitTextIntoLines(header, boldHeader ? boldFont : font, fontSize, columnWidths[colIndex] - 10);
-          page.drawRectangle({
-            x: cellX,
-            y: currentY - rowHeight,
-            width: columnWidths[colIndex],
-            height: rowHeight,
-            borderWidth: 1,
-            borderColor,
-            color: primaryColor,
-          });
-          page.drawText(wrappedLines[0] || header, {
-            x: cellX + 5,
-            y: currentY - fontSize - 5,
-            font: boldHeader ? boldFont : font,
-            size: fontSize,
-            color: rgb(1, 1, 1),
-          });
-        });
-        currentY -= rowHeight;
+        return { currentY: page.getSize().height - 50, newPage: true };
       }
 
-      row.forEach((cell, colIndex) => {
-        const cellX = x + columnWidths.slice(0, colIndex).reduce((sum, w) => sum + w, 0);
-        const wrappedLines = splitTextIntoLines(cell, font, fontSize, columnWidths[colIndex] - 10);
+      // Draw header
+      headers.forEach((header, colIndex) => {
+        const cellX =
+          x + columnWidths.slice(0, colIndex).reduce((sum, w) => sum + w, 0);
+        const wrappedLines = splitTextIntoLines(
+          header,
+          boldHeader ? boldFont : font,
+          fontSize,
+          columnWidths[colIndex] - 10,
+        );
         page.drawRectangle({
           x: cellX,
           y: currentY - rowHeight,
@@ -1247,79 +1340,107 @@ async createPdfReport(campaignId: string): Promise<Buffer> {
           height: rowHeight,
           borderWidth: 1,
           borderColor,
+          color: primaryColor,
         });
-        page.drawText(wrappedLines[0] || cell, {
+        page.drawText(wrappedLines[0] || header, {
           x: cellX + 5,
           y: currentY - fontSize - 5,
-          font,
+          font: boldHeader ? boldFont : font,
           size: fontSize,
-          color: textColor,
+          color: rgb(1, 1, 1),
         });
       });
       currentY -= rowHeight;
-    }
 
-    return { currentY, newPage: false };
-  };
+      // Draw rows
+      for (const row of rows) {
+        if (currentY - rowHeight < 50) {
+          page = pdfDoc.addPage([600, 800]);
+          // Redraw headers
+          headers.forEach((header, colIndex) => {
+            const cellX =
+              x +
+              columnWidths.slice(0, colIndex).reduce((sum, w) => sum + w, 0);
+            const wrappedLines = splitTextIntoLines(
+              header,
+              boldHeader ? boldFont : font,
+              fontSize,
+              columnWidths[colIndex] - 10,
+            );
+            page.drawRectangle({
+              x: cellX,
+              y: currentY - rowHeight,
+              width: columnWidths[colIndex],
+              height: rowHeight,
+              borderWidth: 1,
+              borderColor,
+              color: primaryColor,
+            });
+            page.drawText(wrappedLines[0] || header, {
+              x: cellX + 5,
+              y: currentY - fontSize - 5,
+              font: boldHeader ? boldFont : font,
+              size: fontSize,
+              color: rgb(1, 1, 1),
+            });
+          });
+          currentY -= rowHeight;
+        }
 
-  // Helper function to draw a bar chart
-  const drawBarChart = (
-    data: { date: string; value: number | null }[],
-    options: {
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      fontSize: number;
-      title: string;
-    }
-  ) => {
-    const { x, y: startY, width: chartWidth, height: chartHeight, fontSize, title } = options;
-    let currentY = startY;
-
-    // Add chart title
-    const titleResult = addText(title, {
-      size: subHeadingSize,
-      bold: true,
-      x,
-      y: currentY,
-      color: primaryColor,
-    });
-    currentY = titleResult.currentY;
-    if (titleResult.newPage) {
-      width = page.getSize().width;
-      height = page.getSize().height;
-    }
-
-    // Filter out null values and limit to 5 entries
-    const validData = data
-      .filter((d) => d.value !== null)
-      .slice(0, 5) as { date: string; value: number }[];
-    if (validData.length === 0) {
-      const noDataResult = addText('No data available for chart', {
-        size: fontSize,
-        x,
-        y: currentY,
-        color: textColor,
-      });
-      currentY = noDataResult.currentY;
-      if (noDataResult.newPage) {
-        width = page.getSize().width;
-        height = page.getSize().height;
+        row.forEach((cell, colIndex) => {
+          const cellX =
+            x + columnWidths.slice(0, colIndex).reduce((sum, w) => sum + w, 0);
+          const wrappedLines = splitTextIntoLines(
+            cell,
+            font,
+            fontSize,
+            columnWidths[colIndex] - 10,
+          );
+          page.drawRectangle({
+            x: cellX,
+            y: currentY - rowHeight,
+            width: columnWidths[colIndex],
+            height: rowHeight,
+            borderWidth: 1,
+            borderColor,
+          });
+          page.drawText(wrappedLines[0] || cell, {
+            x: cellX + 5,
+            y: currentY - fontSize - 5,
+            font,
+            size: fontSize,
+            color: textColor,
+          });
+        });
+        currentY -= rowHeight;
       }
-      return currentY;
-    }
 
-    // Calculate max value for scaling
-    const maxValue = Math.max(...validData.map((d) => d.value));
-    const barWidth = chartWidth / validData.length / 1.5;
-    const barSpacing = chartWidth / validData.length / 5;
-    const maxBarHeight = chartHeight - 40; // Leave space for labels
+      return { currentY, newPage: false };
+    };
 
-    // Check if there's enough space
-    if (currentY - (chartHeight + 20) < 50) {
-      page = pdfDoc.addPage([600, 800]);
-      currentY = page.getSize().height - 50;
+    // Helper function to draw a bar chart
+    const drawBarChart = (
+      data: { date: string; value: number | null }[],
+      options: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        fontSize: number;
+        title: string;
+      },
+    ) => {
+      const {
+        x,
+        y: startY,
+        width: chartWidth,
+        height: chartHeight,
+        fontSize,
+        title,
+      } = options;
+      let currentY = startY;
+
+      // Add chart title
       const titleResult = addText(title, {
         size: subHeadingSize,
         bold: true,
@@ -1332,224 +1453,163 @@ async createPdfReport(campaignId: string): Promise<Buffer> {
         width = page.getSize().width;
         height = page.getSize().height;
       }
-    }
 
-    // Draw axes
-    page.drawLine({
-      start: { x, y: currentY - 20 },
-      end: { x, y: currentY - maxBarHeight - 20 },
-      thickness: 1,
-      color: chartAxisColor,
-    }); // Y-axis
-    page.drawLine({
-      start: { x, y: currentY - 20 },
-      end: { x: x + chartWidth, y: currentY - 20 },
-      thickness: 1,
-      color: chartAxisColor,
-    }); // X-axis
+      // Filter out null values and limit to 5 entries
+      const validData = data.filter((d) => d.value !== null).slice(0, 5) as {
+        date: string;
+        value: number;
+      }[];
+      if (validData.length === 0) {
+        const noDataResult = addText('No data available for chart', {
+          size: fontSize,
+          x,
+          y: currentY,
+          color: textColor,
+        });
+        currentY = noDataResult.currentY;
+        if (noDataResult.newPage) {
+          width = page.getSize().width;
+          height = page.getSize().height;
+        }
+        return currentY;
+      }
 
-    // Draw bars and labels
-    validData.forEach((item, index) => {
-      const barX = x + index * (barWidth + barSpacing);
-      const barHeight = (item.value / maxValue) * maxBarHeight;
-      page.drawRectangle({
-        x: barX,
-        y: currentY - 20 - barHeight,
-        width: barWidth,
-        height: barHeight,
-        color: primaryColor,
+      // Calculate max value for scaling
+      const maxValue = Math.max(...validData.map((d) => d.value));
+      const barWidth = chartWidth / validData.length / 1.5;
+      const barSpacing = chartWidth / validData.length / 5;
+      const maxBarHeight = chartHeight - 40; // Leave space for labels
+
+      // Check if there's enough space
+      if (currentY - (chartHeight + 20) < 50) {
+        page = pdfDoc.addPage([600, 800]);
+        currentY = page.getSize().height - 50;
+        const titleResult = addText(title, {
+          size: subHeadingSize,
+          bold: true,
+          x,
+          y: currentY,
+          color: primaryColor,
+        });
+        currentY = titleResult.currentY;
+        if (titleResult.newPage) {
+          width = page.getSize().width;
+          height = page.getSize().height;
+        }
+      }
+
+      // Draw axes
+      page.drawLine({
+        start: { x, y: currentY - 20 },
+        end: { x, y: currentY - maxBarHeight - 20 },
+        thickness: 1,
+        color: chartAxisColor,
+      }); // Y-axis
+      page.drawLine({
+        start: { x, y: currentY - 20 },
+        end: { x: x + chartWidth, y: currentY - 20 },
+        thickness: 1,
+        color: chartAxisColor,
+      }); // X-axis
+
+      // Draw bars and labels
+      validData.forEach((item, index) => {
+        const barX = x + index * (barWidth + barSpacing);
+        const barHeight = (item.value / maxValue) * maxBarHeight;
+        page.drawRectangle({
+          x: barX,
+          y: currentY - 20 - barHeight,
+          width: barWidth,
+          height: barHeight,
+          color: primaryColor,
+        });
+        // X-axis label (date)
+        const shortDate = item.date.split('-').slice(1).join('-'); // e.g., "07-01"
+        page.drawText(shortDate, {
+          x: barX + barWidth / 2 - fontSize,
+          y: currentY - 15 - fontSize,
+          font,
+          size: fontSize - 2,
+          color: textColor,
+        });
       });
-      // X-axis label (date)
-      const shortDate = item.date.split('-').slice(1).join('-'); // e.g., "07-01"
-      page.drawText(shortDate, {
-        x: barX + barWidth / 2 - fontSize,
-        y: currentY - 15 - fontSize,
+
+      // Y-axis labels (simplified: max value and half)
+      page.drawText(`${Math.round(maxValue)}`, {
+        x: x - 40,
+        y: currentY - 20 - maxBarHeight - fontSize / 2,
         font,
         size: fontSize - 2,
         color: textColor,
       });
-    });
+      page.drawText(`${Math.round(maxValue / 2)}`, {
+        x: x - 40,
+        y: currentY - 20 - maxBarHeight / 2 - fontSize / 2,
+        font,
+        size: fontSize - 2,
+        color: textColor,
+      });
 
-    // Y-axis labels (simplified: max value and half)
-    page.drawText(`${Math.round(maxValue)}`, {
-      x: x - 40,
-      y: currentY - 20 - maxBarHeight - fontSize / 2,
-      font,
-      size: fontSize - 2,
+      currentY -= chartHeight + 20;
+      return currentY;
+    };
+
+    // Add Cover Page
+    let result = addText('Campaign Performance Report', {
+      size: coverTitleSize,
+      bold: true,
+      maxWidth: width - 100,
+      lineHeight: coverTitleSize * 1.2,
+      x: 50,
+      y,
+      color: primaryColor,
+    });
+    y = result.currentY;
+    if (result.newPage) {
+      width = page.getSize().width;
+      height = page.getSize().height;
+    }
+
+    result = addText(`Campaign: ${report.campaignName}`, {
+      size: coverSubtitleSize,
+      bold: true,
+      maxWidth: width - 100,
+      lineHeight: coverSubtitleSize * 1.2,
+      x: 50,
+      y,
       color: textColor,
     });
-    page.drawText(`${Math.round(maxValue / 2)}`, {
-      x: x - 40,
-      y: currentY - 20 - maxBarHeight / 2 - fontSize / 2,
-      font,
-      size: fontSize - 2,
-      color: textColor,
-    });
+    y = result.currentY;
+    if (result.newPage) {
+      width = page.getSize().width;
+      height = page.getSize().height;
+    }
 
-    currentY -= chartHeight + 20;
-    return currentY;
-  };
-
-  // Add Cover Page
-  let result = addText('Campaign Performance Report', {
-    size: coverTitleSize,
-    bold: true,
-    maxWidth: width - 100,
-    lineHeight: coverTitleSize * 1.2,
-    x: 50,
-    y,
-    color: primaryColor,
-  });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-
-  result = addText(`Campaign: ${report.campaignName}`, {
-    size: coverSubtitleSize,
-    bold: true,
-    maxWidth: width - 100,
-    lineHeight: coverSubtitleSize * 1.2,
-    x: 50,
-    y,
-    color: textColor,
-  });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-
-  result = addText(`Generated on: ${new Date().toISOString().split('T')[0]}`, {
-    size: fontSize,
-    maxWidth: width - 100,
-    lineHeight: fontSize * 1.2,
-    x: 50,
-    y,
-    color: textColor,
-  });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-
-  // Start content on a new page
-  page = pdfDoc.addPage([600, 800]);
-  width = page.getSize().width;
-  height = page.getSize().height;
-  y = height - 50;
-
-  // Add Campaign Details
-  result = addText('Campaign Details', {
-    size: subHeadingSize,
-    bold: true,
-    y,
-    color: primaryColor,
-  });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-
-  result = addText(`Campaign ID: ${report.campaignId}`, { size: fontSize, y });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-
-  result = addText(`Campaign Name: ${report.campaignName}`, { size: fontSize, y });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-  y -= 20;
-
-  // Add Performance Summary
-  result = addText('Performance Summary', {
-    size: subHeadingSize,
-    bold: true,
-    y,
-    color: primaryColor,
-  });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-
-  result = addText(report.performanceSummary.overview, {
-    size: fontSize,
-    maxWidth: 500,
-    lineHeight: 14,
-    y,
-  });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-  y -= 20;
-
-  // Add Key Metrics Table
-  result = addText('Key Metrics', {
-    size: subHeadingSize,
-    bold: true,
-    y,
-    color: primaryColor,
-  });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-
-  const metricsHeaders = ['Metric', 'Value'];
-  const metricsRows = Object.entries(report.performanceSummary.keyMetrics).map(([metric, value]) => {
-    const formattedMetric = metric
-      .replace(/([A-Z])/g, ' $1')
-      .replace(/^./, (str) => str.toUpperCase());
-    return [formattedMetric, value?.toString() ?? 'N/A'];
-  });
-  const metricsTableResult = drawTable(metricsHeaders, metricsRows, {
-    x: 50,
-    y,
-    columnWidths: [250, 200],
-    rowHeight: 30,
-    fontSize,
-    boldHeader: true,
-  });
-  y = metricsTableResult.currentY;
-  if (metricsTableResult.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-  y -= 20;
-
-  // Add Daily Performance Trends (Chart and Table)
-  if (report.performanceSummary.trends.dailyPerformance.length > 0) {
-    // Bar Chart for Impressions
-    y = drawBarChart(
-      report.performanceSummary.trends.dailyPerformance.slice(0, 5).map((day) => ({
-        date: day.date,
-        value: day.impressions ?? 0,
-      })),
+    result = addText(
+      `Generated on: ${new Date().toISOString().split('T')[0]}`,
       {
+        size: fontSize,
+        maxWidth: width - 100,
+        lineHeight: fontSize * 1.2,
         x: 50,
         y,
-        width: 450,
-        height: 200,
-        fontSize,
-        title: 'Daily Impressions Trend',
-      }
+        color: textColor,
+      },
     );
+    y = result.currentY;
+    if (result.newPage) {
+      width = page.getSize().width;
+      height = page.getSize().height;
+    }
 
-    // Table
-    result = addText('Daily Performance Trends', {
+    // Start content on a new page
+    page = pdfDoc.addPage([600, 800]);
+    width = page.getSize().width;
+    height = page.getSize().height;
+    y = height - 50;
+
+    // Add Campaign Details
+    result = addText('Campaign Details', {
       size: subHeadingSize,
       bold: true,
       y,
@@ -1561,59 +1621,41 @@ async createPdfReport(campaignId: string): Promise<Buffer> {
       height = page.getSize().height;
     }
 
-    const trendsHeaders = ['Date', 'Impressions', 'Clicks', 'Cost'];
-    const dailyData = report.performanceSummary.trends.dailyPerformance.slice(0, 5);
-    const trendsRows = dailyData.map((day) => [
-      day.date,
-      day.impressions?.toString() ?? 'N/A',
-      day.clicks?.toString() ?? 'N/A',
-      day.costInLocalCurrency?.toString() ?? 'N/A',
-    ]);
-    const trendsTableResult = drawTable(trendsHeaders, trendsRows, {
-      x: 50,
+    result = addText(`Campaign ID: ${report.campaignId}`, {
+      size: fontSize,
       y,
-      columnWidths: [120, 110, 110, 110],
-      rowHeight: 30,
-      fontSize,
-      boldHeader: true,
     });
-    y = trendsTableResult.currentY;
-    if (trendsTableResult.newPage) {
+    y = result.currentY;
+    if (result.newPage) {
+      width = page.getSize().width;
+      height = page.getSize().height;
+    }
+
+    result = addText(`Campaign Name: ${report.campaignName}`, {
+      size: fontSize,
+      y,
+    });
+    y = result.currentY;
+    if (result.newPage) {
       width = page.getSize().width;
       height = page.getSize().height;
     }
     y -= 20;
-  }
 
-  // Add Recommended Actions
-  result = addText('Recommended Actions', {
-    size: subHeadingSize,
-    bold: true,
-    y,
-    color: primaryColor,
-  });
-  y = result.currentY;
-  if (result.newPage) {
-    width = page.getSize().width;
-    height = page.getSize().height;
-  }
-
-  for (const action of report.recommendedActions) {
-    result = addText(`Action: ${action.action}`, { size: fontSize, bold: true, y });
+    // Add Performance Summary
+    result = addText('Performance Summary', {
+      size: subHeadingSize,
+      bold: true,
+      y,
+      color: primaryColor,
+    });
     y = result.currentY;
     if (result.newPage) {
       width = page.getSize().width;
       height = page.getSize().height;
     }
 
-    result = addText(`Priority: ${action.priority}`, { size: fontSize, y });
-    y = result.currentY;
-    if (result.newPage) {
-      width = page.getSize().width;
-      height = page.getSize().height;
-    }
-
-    result = addText(`Rationale: ${action.rationale}`, {
+    result = addText(report.performanceSummary.overview, {
       size: fontSize,
       maxWidth: 500,
       lineHeight: 14,
@@ -1624,8 +1666,389 @@ async createPdfReport(campaignId: string): Promise<Buffer> {
       width = page.getSize().width;
       height = page.getSize().height;
     }
-  }
+    y -= 20;
 
-  return Buffer.from(await pdfDoc.save());
+    // Add Key Metrics Table
+    result = addText('Key Metrics', {
+      size: subHeadingSize,
+      bold: true,
+      y,
+      color: primaryColor,
+    });
+    y = result.currentY;
+    if (result.newPage) {
+      width = page.getSize().width;
+      height = page.getSize().height;
+    }
+
+    const metricsHeaders = ['Metric', 'Value'];
+    const metricsRows = Object.entries(
+      report.performanceSummary.keyMetrics,
+    ).map(([metric, value]) => {
+      const formattedMetric = metric
+        .replace(/([A-Z])/g, ' $1')
+        .replace(/^./, (str) => str.toUpperCase());
+      return [formattedMetric, value?.toString() ?? 'N/A'];
+    });
+    const metricsTableResult = drawTable(metricsHeaders, metricsRows, {
+      x: 50,
+      y,
+      columnWidths: [250, 200],
+      rowHeight: 30,
+      fontSize,
+      boldHeader: true,
+    });
+    y = metricsTableResult.currentY;
+    if (metricsTableResult.newPage) {
+      width = page.getSize().width;
+      height = page.getSize().height;
+    }
+    y -= 20;
+
+    // Add Daily Performance Trends (Chart and Table)
+    if (report.performanceSummary.trends.dailyPerformance.length > 0) {
+      // Bar Chart for Impressions
+      y = drawBarChart(
+        report.performanceSummary.trends.dailyPerformance
+          .slice(0, 5)
+          .map((day) => ({
+            date: day.date,
+            value: day.impressions ?? 0,
+          })),
+        {
+          x: 50,
+          y,
+          width: 450,
+          height: 200,
+          fontSize,
+          title: 'Daily Impressions Trend',
+        },
+      );
+
+      // Table
+      result = addText('Daily Performance Trends', {
+        size: subHeadingSize,
+        bold: true,
+        y,
+        color: primaryColor,
+      });
+      y = result.currentY;
+      if (result.newPage) {
+        width = page.getSize().width;
+        height = page.getSize().height;
+      }
+
+      const trendsHeaders = ['Date', 'Impressions', 'Clicks', 'Cost'];
+      const dailyData = report.performanceSummary.trends.dailyPerformance.slice(
+        0,
+        5,
+      );
+      const trendsRows = dailyData.map((day) => [
+        day.date,
+        day.impressions?.toString() ?? 'N/A',
+        day.clicks?.toString() ?? 'N/A',
+        day.costInLocalCurrency?.toString() ?? 'N/A',
+      ]);
+      const trendsTableResult = drawTable(trendsHeaders, trendsRows, {
+        x: 50,
+        y,
+        columnWidths: [120, 110, 110, 110],
+        rowHeight: 30,
+        fontSize,
+        boldHeader: true,
+      });
+      y = trendsTableResult.currentY;
+      if (trendsTableResult.newPage) {
+        width = page.getSize().width;
+        height = page.getSize().height;
+      }
+      y -= 20;
+    }
+
+    // Add Recommended Actions
+    result = addText('Recommended Actions', {
+      size: subHeadingSize,
+      bold: true,
+      y,
+      color: primaryColor,
+    });
+    y = result.currentY;
+    if (result.newPage) {
+      width = page.getSize().width;
+      height = page.getSize().height;
+    }
+
+    for (const action of report.recommendedActions) {
+      result = addText(`Action: ${action.action}`, {
+        size: fontSize,
+        bold: true,
+        y,
+      });
+      y = result.currentY;
+      if (result.newPage) {
+        width = page.getSize().width;
+        height = page.getSize().height;
+      }
+
+      result = addText(`Priority: ${action.priority}`, { size: fontSize, y });
+      y = result.currentY;
+      if (result.newPage) {
+        width = page.getSize().width;
+        height = page.getSize().height;
+      }
+
+      result = addText(`Rationale: ${action.rationale}`, {
+        size: fontSize,
+        maxWidth: 500,
+        lineHeight: 14,
+        y,
+      });
+      y = result.currentY;
+      if (result.newPage) {
+        width = page.getSize().width;
+        height = page.getSize().height;
+      }
+    }
+
+    return Buffer.from(await pdfDoc.save());
+  }
+  async restoreCampaignRelations(): Promise<{
+  success: boolean;
+  message: string;
+  data: {
+    totalCampaignsProcessed: number;
+    campaignsUpdated: number;
+    errors: string[];
+    adAccountsProcessed: string[];
+    campaignGroupsFound: number;
+  };
+}> {
+  this.logger.log('Starting restoration of campaign ad_account_id and campaign_group_id');
+
+  try {
+    // Step 1: Get ALL ad accounts for the organization (ignore config)
+    const allAdAccounts = await this.prisma.adAccount.findMany({
+      where: { organizationId: 'single-org' },
+      select: { id: true, accountUrn: true },
+    });
+
+    if (allAdAccounts.length === 0) {
+      this.logger.error('No ad accounts found for organization single-org');
+      return {
+        success: false,
+        message: 'No ad accounts found for organization',
+        data: { 
+          totalCampaignsProcessed: 0, 
+          campaignsUpdated: 0, 
+          errors: ['No ad accounts found'], 
+          adAccountsProcessed: [],
+          campaignGroupsFound: 0
+        },
+      };
+    }
+
+    const adAccountIds = allAdAccounts.map(acc => acc.id);
+    this.logger.log(`Found ${adAccountIds.length} ad accounts: ${adAccountIds.join(', ')}`);
+
+    // Step 2: Get ALL campaign groups to build URN-to-ID mapping
+    const allCampaignGroups = await this.prisma.campaignGroup.findMany({
+      where: { adAccount: { organizationId: 'single-org' } },
+      select: { id: true, urn: true, name: true, adAccountId: true },
+    });
+
+    const campaignGroupMap = new Map(
+      allCampaignGroups
+        .filter(group => group.urn) // Only groups with URNs
+        .map(group => [group.urn!.split(':').pop(), group.id])
+    );
+    
+    // Also create ad account mapping for campaign groups
+    const campaignGroupToAdAccountMap = new Map(
+      allCampaignGroups.map(group => [group.id, group.adAccountId])
+    );
+
+    this.logger.log(`Found ${allCampaignGroups.length} campaign groups, ${campaignGroupMap.size} with valid URNs`);
+    this.logger.log('Campaign group URN mapping:', Array.from(campaignGroupMap.entries()));
+
+    // Step 3: Fetch ALL campaigns from LinkedIn API using all ad accounts
+    this.logger.log('Fetching ALL campaigns from LinkedIn API...');
+    const allLinkedInCampaigns: any[] = [];
+
+    for (const adAccountId of adAccountIds) {
+      try {
+        this.logger.log(`Fetching campaigns for ad account: ${adAccountId}`);
+        const campaigns = await this.campaignsService.fetchLinkedInCampaigns([adAccountId]);
+        
+        // Add adAccountId to each campaign for reference
+        const campaignsWithAdAccount = campaigns.map(campaign => ({
+          ...campaign,
+          adAccountId // Ensure this is set
+        }));
+        
+        allLinkedInCampaigns.push(...campaignsWithAdAccount);
+        this.logger.log(`Fetched ${campaigns.length} campaigns from ad account ${adAccountId}`);
+      } catch (error: any) {
+        this.logger.error(`Failed to fetch campaigns from ad account ${adAccountId}: ${error.message}`);
+        // Continue with other ad accounts
+      }
+    }
+
+    this.logger.log(`Total campaigns fetched from LinkedIn API: ${allLinkedInCampaigns.length}`);
+
+    if (allLinkedInCampaigns.length === 0) {
+      return {
+        success: false,
+        message: 'No campaigns found in LinkedIn API',
+        data: { 
+          totalCampaignsProcessed: 0, 
+          campaignsUpdated: 0, 
+          errors: ['No campaigns found in LinkedIn API'], 
+          adAccountsProcessed: adAccountIds,
+          campaignGroupsFound: allCampaignGroups.length
+        },
+      };
+    }
+
+    // Step 4: Create mapping of external_id to LinkedIn campaign data
+    const linkedInCampaignMap = new Map(
+      allLinkedInCampaigns
+        .filter(campaign => campaign.id) // Only campaigns with IDs
+        .map(campaign => [
+          campaign.id.toString(),
+          {
+            adAccountId: campaign.adAccountId,
+            campaignGroupUrn: campaign.campaignGroup,
+            campaignGroupId: campaign.campaignGroup 
+              ? campaignGroupMap.get(campaign.campaignGroup.split(':').pop()) 
+              : null,
+            name: campaign.name || 'Unknown'
+          }
+        ])
+    );
+
+    this.logger.log(`Created mapping for ${linkedInCampaignMap.size} LinkedIn campaigns`);
+
+    // Step 5: Get all campaigns from database that need fixing
+    const campaignsToFix = await this.prisma.marketingCampaign.findMany({
+      where: {
+        OR: [
+          { ad_account_id: null },
+          { campaign_group_id: null }
+        ]
+      },
+      select: {
+        campaign_id: true,
+        external_id: true,
+        campaign_name: true,
+        ad_account_id: true,
+        campaign_group_id: true,
+      },
+    });
+
+    this.logger.log(`Found ${campaignsToFix.length} campaigns in database that need fixing`);
+
+    if (campaignsToFix.length === 0) {
+      return {
+        success: true,
+        message: 'No campaigns need fixing',
+        data: { 
+          totalCampaignsProcessed: 0, 
+          campaignsUpdated: 0, 
+          errors: [], 
+          adAccountsProcessed: adAccountIds,
+          campaignGroupsFound: allCampaignGroups.length
+        },
+      };
+    }
+
+    // Step 6: Update campaigns with restored relationships
+    let campaignsUpdated = 0;
+    const errors: string[] = [];
+
+    for (const dbCampaign of campaignsToFix) {
+      if (!dbCampaign.external_id) {
+        errors.push(`Campaign ${dbCampaign.campaign_id} has no external_id, cannot restore`);
+        continue;
+      }
+
+      const linkedInData = linkedInCampaignMap.get(dbCampaign.external_id);
+      if (!linkedInData) {
+        errors.push(`No LinkedIn data found for campaign ${dbCampaign.campaign_id} (external_id: ${dbCampaign.external_id})`);
+        continue;
+      }
+
+      const updateData: {
+        ad_account_id?: string;
+        campaign_group_id?: string;
+      } = {};
+
+      // Restore ad_account_id
+      if (!dbCampaign.ad_account_id && linkedInData.adAccountId) {
+        updateData.ad_account_id = linkedInData.adAccountId;
+      }
+
+      // Restore campaign_group_id
+      if (!dbCampaign.campaign_group_id && linkedInData.campaignGroupId) {
+        updateData.campaign_group_id = linkedInData.campaignGroupId;
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        try {
+          await this.prisma.marketingCampaign.update({
+            where: { campaign_id: dbCampaign.campaign_id },
+            data: updateData,
+          });
+
+          campaignsUpdated++;
+          this.logger.log(`✅ Restored campaign ${dbCampaign.campaign_id} (${dbCampaign.campaign_name}):`, {
+            external_id: dbCampaign.external_id,
+            restored: updateData,
+            linkedInData: {
+              adAccountId: linkedInData.adAccountId,
+              campaignGroupUrn: linkedInData.campaignGroupUrn,
+              campaignGroupId: linkedInData.campaignGroupId,
+            }
+          });
+        } catch (updateError: any) {
+          errors.push(`Failed to update campaign ${dbCampaign.campaign_id}: ${updateError.message}`);
+          this.logger.error(`Failed to update campaign ${dbCampaign.campaign_id}:`, updateError);
+        }
+      } else {
+        errors.push(`No valid update data for campaign ${dbCampaign.campaign_id} - LinkedIn data: ${JSON.stringify(linkedInData)}`);
+      }
+    }
+
+    const success = errors.length === 0;
+    const message = success 
+      ? `Successfully restored relations for ${campaignsUpdated} campaigns`
+      : `Restored ${campaignsUpdated} campaigns with ${errors.length} errors`;
+
+    this.logger.log(`Restoration completed: ${message}`);
+
+    return {
+      success,
+      message,
+      data: {
+        totalCampaignsProcessed: campaignsToFix.length,
+        campaignsUpdated,
+        errors,
+        adAccountsProcessed: adAccountIds,
+        campaignGroupsFound: allCampaignGroups.length,
+      },
+    };
+  } catch (error: any) {
+    this.logger.error(`Restoration failed: ${error.message}`, error.stack);
+    return {
+      success: false,
+      message: 'Failed to restore campaign relations',
+      data: {
+        totalCampaignsProcessed: 0,
+        campaignsUpdated: 0,
+        errors: [error.message],
+        adAccountsProcessed: [],
+        campaignGroupsFound: 0,
+      },
+    };
+  }
 }
 }
