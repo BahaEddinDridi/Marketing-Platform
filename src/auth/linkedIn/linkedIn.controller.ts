@@ -7,27 +7,29 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { LinkedInService } from './linkedIn.service';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { Session as ExpressSession } from 'express-session';
 import { Session } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 
-// Define possible types for req.user in linkedInPageCallback
 interface LinkedInPageUser {
   redirect?: string;
   orgProfiles?: any[];
-  // Add other possible page properties
   id?: string;
   name?: string;
   vanityName?: string;
 }
 
 interface AuthenticatedRequest extends Request {
-  user?: { user_id: string; email: string; orgId: string; role?: string } | LinkedInPageUser;
+  user?:
+    | { user_id: string; email: string; orgId: string; role?: string }
+    | LinkedInPageUser;
   session: ExpressSession;
 }
 
@@ -50,20 +52,48 @@ export class LinkedInController {
 
   @UseGuards(JwtAuthGuard)
   @Post('test-connection')
-  async testConnection(@Req() req: AuthenticatedRequest) {
+  async testConnection(
+    @Req() req: AuthenticatedRequest,
+    @Body() body: { clientId?: string; clientSecret?: string },
+  ) {
     const user = req.user as { user_id: string; email: string; orgId: string };
-    return this.linkedInService.testLinkedInConnection(user.user_id, req.session);
+    const creds =
+      body.clientId && body.clientSecret
+        ? { clientId: body.clientId, clientSecret: body.clientSecret }
+        : undefined;
+    return this.linkedInService.testLinkedInConnection(
+      user.user_id,
+      req.session,
+      creds,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('test-result')
+  async getTestResult(@Req() req: AuthenticatedRequest) {
+    return this.linkedInService.getTestResult(req.session);
+  }
+
+  @Get('test/callback') // Dedicated route for test flow
+  async handleTestCallback(
+    @Query('code') code: string,
+    @Query('state') state: string,
+    @Req() req: Request & { session: ExpressSession },
+    @Res() res: Response,
+  ) {
+    const result = await this.linkedInService.handleLinkedInCallback(code, state, req.session);
+    res.redirect(result.redirect); // Redirect popup to completion URL
   }
 
   @Get('callback')
+  @UseGuards(AuthGuard('linkedin')) // Passport.js for non-test flows
   async handleCallback(
     @Query('code') code: string,
     @Query('state') state: string,
     @Req() req: Request & { session: ExpressSession },
   ) {
-    return this.linkedInService.handleLinkedInCallback(code, state, req.session);
+    return { message: 'LinkedIn authentication completed', user: req.user };
   }
-
   @UseGuards(JwtAuthGuard)
   @Get('credentials')
   async getCredentials() {
@@ -98,7 +128,10 @@ export class LinkedInController {
     @Body() body: { signInMethod: boolean },
   ) {
     const user = req.user as { user_id: string; email: string; orgId: string };
-    return this.linkedInService.updateLinkedInPreferences(user.user_id, body.signInMethod);
+    return this.linkedInService.updateLinkedInPreferences(
+      user.user_id,
+      body.signInMethod,
+    );
   }
 
   @UseGuards(JwtAuthGuard)
@@ -115,14 +148,20 @@ export class LinkedInController {
   @UseGuards(JwtAuthGuard)
   @Post('page/connect')
   async connectLinkedInPage(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string; orgId: string; role: string };
+    const user = req.user as {
+      user_id: string;
+      email: string;
+      orgId: string;
+      role: string;
+    };
     if (user.role !== 'ADMIN') {
-      throw new HttpException('Only admins can connect LinkedIn pages', HttpStatus.FORBIDDEN);
+      throw new HttpException(
+        'Only admins can connect LinkedIn pages',
+        HttpStatus.FORBIDDEN,
+      );
     }
     return this.linkedInService.connectLinkedInPage(user.user_id, req.session);
   }
-
-
 
   @UseGuards(JwtAuthGuard)
   @Post('page/disconnect')
@@ -130,17 +169,34 @@ export class LinkedInController {
     @Req() req: AuthenticatedRequest,
     @Body() body: { pageId: string },
   ) {
-    const user = req.user as { user_id: string; email: string; orgId: string; role: string };
+    const user = req.user as {
+      user_id: string;
+      email: string;
+      orgId: string;
+      role: string;
+    };
     if (user.role !== 'ADMIN') {
-      throw new HttpException('Only admins can disconnect LinkedIn pages', HttpStatus.FORBIDDEN);
+      throw new HttpException(
+        'Only admins can disconnect LinkedIn pages',
+        HttpStatus.FORBIDDEN,
+      );
     }
-    return this.linkedInService.disconnectLinkedInPage(user.user_id, body.pageId, req.session);
+    return this.linkedInService.disconnectLinkedInPage(
+      user.user_id,
+      body.pageId,
+      req.session,
+    );
   }
 
   @UseGuards(JwtAuthGuard)
   @Get('pages')
   async getLinkedInPages(@Req() req: AuthenticatedRequest) {
-    const user = req.user as { user_id: string; email: string; orgId: string; role: string };
+    const user = req.user as {
+      user_id: string;
+      email: string;
+      orgId: string;
+      role: string;
+    };
 
     return this.linkedInService.getStoredLinkedInPages();
   }
@@ -152,11 +208,20 @@ export class LinkedInController {
     @Req() req: AuthenticatedRequest,
     @Session() session: ExpressSession,
   ) {
-    const user = req.user as { user_id: string; email: string; orgId: string; role: string };
+    const user = req.user as {
+      user_id: string;
+      email: string;
+      orgId: string;
+      role: string;
+    };
     if (!session) {
       throw new HttpException('Session not found', HttpStatus.BAD_REQUEST);
     }
-    return this.linkedInService.selectLinkedInPage(user.user_id, body.pageId, session);
+    return this.linkedInService.selectLinkedInPage(
+      user.user_id,
+      body.pageId,
+      session,
+    );
   }
 
   @UseGuards(JwtAuthGuard)
@@ -166,9 +231,15 @@ export class LinkedInController {
       throw new HttpException('Session not found', HttpStatus.BAD_REQUEST);
     }
     if (!session.orgProfiles) {
-      throw new HttpException('No organization profiles found', HttpStatus.NOT_FOUND);
+      throw new HttpException(
+        'No organization profiles found',
+        HttpStatus.NOT_FOUND,
+      );
     }
-    console.log('Session in getPageProfiles at 19:07 CET:', session.orgProfiles);
+    console.log(
+      'Session in getPageProfiles at 19:07 CET:',
+      session.orgProfiles,
+    );
     return { orgProfiles: session.orgProfiles };
   }
 }

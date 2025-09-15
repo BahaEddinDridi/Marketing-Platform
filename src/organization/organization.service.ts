@@ -112,6 +112,7 @@ export class OrganizationService {
         profileImage: true,
         role: true,
         allowPersonalEmailSync: true,
+        status: true,
         password: true,
       },
     });
@@ -125,6 +126,7 @@ export class OrganizationService {
       profileImage: member.profileImage,
       role: member.role,
       allowPersonalEmailSync: member.allowPersonalEmailSync,
+      status: member.status,
       hasPassword: !!member.password, 
     }));
   }

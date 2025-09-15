@@ -232,7 +232,7 @@ Boost your business with Odoo CRM. Try now!`;
   ): Promise<string[]> {
     try {
       const response = await this.groqClient.chat.completions.create({
-        model: 'llama3-70b-8192', // Keep the working model
+        model: 'llama-3.1-8b-instant', // Keep the working model
         messages: [
           {
             role: 'system',

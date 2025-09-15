@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   InternalServerErrorException,
   UnauthorizedException,
@@ -171,7 +173,12 @@ export class LinkedInService {
     return { message: 'LinkedIn credentials saved successfully' };
   }
 
-  async testLinkedInConnection(userId: string, session: any) {
+  async testLinkedInConnection(
+    userId: string,
+    session: any,
+    creds?: { clientId: string; clientSecret: string },
+  ) {
+    this.logger.log(`Testing LinkedIn connection for user ${userId}`);
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
     });
@@ -179,19 +186,38 @@ export class LinkedInService {
     if (user.role !== 'ADMIN')
       throw new ForbiddenException('Only admins can test LinkedIn credentials');
 
-    const org = await this.prisma.organization.findUnique({
-      where: { id: 'single-org' },
-      select: { linkedInCreds: true },
-    });
-    if (!org || !org.linkedInCreds) {
-      throw new Error('No LinkedIn credentials found');
+    let clientId: string;
+    let clientSecret: string;
+
+    if (creds && creds.clientId && creds.clientSecret) {
+      // Store test credentials in session for callback
+      session.testCredentials = {
+        clientId: creds.clientId,
+        clientSecret: creds.clientSecret,
+      };
+      clientId = creds.clientId;
+      clientSecret = creds.clientSecret;
+    } else {
+      // Fallback to stored credentials
+      const org = await this.prisma.organization.findUnique({
+        where: { id: 'single-org' },
+        select: { linkedInCreds: true },
+      });
+      if (!org || !org.linkedInCreds) {
+        throw new Error('No LinkedIn credentials found');
+      }
+      const credsObj =
+        typeof org.linkedInCreds === 'string'
+          ? JSON.parse(org.linkedInCreds)
+          : (org.linkedInCreds as { clientId: string; clientSecret: string });
+      clientId = decrypt(credsObj.clientId);
+      clientSecret = decrypt(credsObj.clientSecret);
+      session.testCredentials = { clientId, clientSecret };
     }
 
-    const { clientId } = org.linkedInCreds as any;
-
-    const redirectUri = this.configService.get<string>(
-      'LINKEDIN_REDIRECT_TEST_URI',
-    );
+    const redirectUri =
+      this.configService.get<string>('LINKEDIN_REDIRECT_TEST_URI') ||
+      'http://localhost:5000/auth/linkedin/test/callback';
     if (!redirectUri) {
       throw new InternalServerErrorException(
         'LINKEDIN_REDIRECT_TEST_URI is not defined in environment variables',
@@ -201,48 +227,79 @@ export class LinkedInService {
     try {
       const state = uuidv4();
       session.linkedinState = state;
+      session.testConnection = true; // Flag to indicate this is a test connection
 
       const authUrl = new URL(this.linkedInAuthUrl);
       authUrl.searchParams.append('response_type', 'code');
       authUrl.searchParams.append('client_id', clientId);
       authUrl.searchParams.append('redirect_uri', redirectUri);
-      authUrl.searchParams.append('scope', 'profile');
+      authUrl.searchParams.append('scope', 'r_basicprofile'); // Minimal scope
       authUrl.searchParams.append('state', state);
 
+      this.logger.debug(`Generated auth URL: ${authUrl.toString()}`);
       return {
         message: 'Initiate LinkedIn connection test',
         authUrl: authUrl.toString(),
       };
     } catch (error: any) {
+      this.logger.error(
+        `Failed to initiate LinkedIn connection test: ${error.message}`,
+        error.stack,
+      );
       throw new Error('Failed to initiate LinkedIn connection test');
     }
   }
 
   async handleLinkedInCallback(code: string, state: string, session: any) {
-    if (!session.linkedinState || state !== session.linkedinState) {
-      throw new BadRequestException('Invalid state parameter');
-    }
-
-    const org = await this.prisma.organization.findUnique({
-      where: { id: 'single-org' },
-      select: { linkedInCreds: true },
-    });
-    if (!org || !org.linkedInCreds) {
-      throw new Error('No LinkedIn credentials found');
-    }
-
-    const { clientId, clientSecret } = org.linkedInCreds as any;
-
-    const redirectUri = this.configService.get<string>(
-      'LINKEDIN_REDIRECT_TEST_URI',
+    this.logger.debug(
+      `Handling LinkedIn test callback with code: ${code}, state: ${state}`,
     );
+    if (!session.linkedinState || state !== session.linkedinState) {
+      session.testResult = {
+        success: false,
+        message: 'Invalid state parameter',
+      };
+      this.logger.error('Invalid state parameter');
+      return {
+        redirect:
+          'http://localhost:3000/linkedin-test-complete?status=error&message=Invalid+state+parameter',
+      };
+    }
+
+    if (
+      !session.testCredentials ||
+      !session.testCredentials.clientId ||
+      !session.testCredentials.clientSecret
+    ) {
+      session.testResult = {
+        success: false,
+        message: 'No test credentials found',
+      };
+      this.logger.error('No test credentials found');
+      return {
+        redirect:
+          'http://localhost:3000/linkedin-test-complete?status=error&message=No+test+credentials+found',
+      };
+    }
+
+    const { clientId, clientSecret } = session.testCredentials;
+    const redirectUri =
+      this.configService.get<string>('LINKEDIN_REDIRECT_TEST_URI') ||
+      'http://localhost:5000/auth/linkedin/test/callback';
     if (!redirectUri) {
-      throw new InternalServerErrorException(
-        'LINKEDIN_REDIRECT_TEST_URI is not defined in environment variables',
-      );
+      session.testResult = {
+        success: false,
+        message: 'LINKEDIN_TEST_REDIRECT_URI is not defined',
+      };
+      this.logger.error('LINKEDIN_TEST_REDIRECT_URI is not defined');
+      return {
+        redirect:
+          'http://localhost:3000/linkedin-test-complete?status=error&message=LINKEDIN_TEST_REDIRECT_URI+is+not+defined',
+      };
     }
 
     try {
+      this.logger.debug('Attempting token exchange with LinkedIn');
       const response = await axios.post<LinkedInTokenResponse>(
         'https://www.linkedin.com/oauth/v2/accessToken',
         new URLSearchParams({
@@ -256,11 +313,50 @@ export class LinkedInService {
       );
 
       const { access_token } = response.data;
-      delete session.linkedinState; // Clean up session
-      return { message: 'Connection successful', accessToken: access_token };
+      this.logger.debug('Token exchange successful');
+
+      // Skip profile fetch; token exchange success is sufficient
+      session.testResult = {
+        success: true,
+        message: 'Connection successful',
+      };
+
+      delete session.linkedinState;
+      delete session.testCredentials;
+      delete session.testConnection;
+
+      return {
+        redirect: 'http://localhost:3000/linkedin-test-complete?status=success',
+      };
     } catch (error: any) {
-      throw new Error('Failed to complete LinkedIn connection test');
+      const errorMessage =
+        error.response?.data?.error_description ||
+        error.message ||
+        'Failed to complete LinkedIn connection test';
+      this.logger.error(
+        `Failed to complete LinkedIn connection test: ${errorMessage}`,
+        {
+          status: error.response?.status,
+          data: error.response?.data,
+        },
+      );
+      session.testResult = {
+        success: false,
+        message: errorMessage,
+      };
+      return {
+        redirect: `http://localhost:3000/linkedin-test-complete?status=error&message=${encodeURIComponent(errorMessage)}`,
+      };
     }
+  }
+
+  async getTestResult(session: any) {
+    if (!session.testResult) {
+      throw new HttpException('No test result available', HttpStatus.NOT_FOUND);
+    }
+    const result = session.testResult;
+    delete session.testResult; // Clean up
+    return result;
   }
 
   async getLinkedInCredentials() {

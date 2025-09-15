@@ -11,11 +11,13 @@ import {
   UseInterceptors,
   UploadedFile,
   UnauthorizedException,
+  Post,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from 'src/guards/jwt-auth.guard';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Status } from '@prisma/client';
 
 interface AuthenticatedRequest extends Request {
   user: { userId: string; email: string };
@@ -29,6 +31,24 @@ export class UsersController {
   @UseGuards(JwtAuthGuard)
   async getUserProfile(@Param('id') id: string) {
     return this.userService.getUserProfile(id);
+  }
+
+  @Patch(':id/status')
+  @UseGuards(JwtAuthGuard)
+  async activateDeactivateUser(
+    @Param('id') id: string,
+    @Req() request: any,
+    @Body('status') status: Status,
+  ) {
+    const requesterId = request.user?.user_id;
+    return this.userService.activateDeactivateUser(requesterId, id, status);
+  }
+
+  @Post('invite')
+  @UseGuards(JwtAuthGuard)
+  async inviteUsers(@Req() request: any, @Body('emails') emails: string[]) {
+    const requesterId = request.user?.user_id;
+    return this.userService.usersInvite(requesterId, emails);
   }
 
   @Patch(':id/allow-personal-email-sync')

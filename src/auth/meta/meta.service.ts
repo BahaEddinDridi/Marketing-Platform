@@ -269,7 +269,7 @@ export class MetaService {
         {
           params: {
             access_token: accessToken,
-            fields: 'id,name,currency,timezone_name',
+            fields: 'id,name',
           },
         },
       );

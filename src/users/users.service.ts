@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
@@ -7,6 +8,8 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { UpdateUserDto } from './dto/update-user.dto';
 import * as bcrypt from 'bcryptjs';
 import { v2 as cloudinary } from 'cloudinary';
+import { Status } from '@prisma/client';
+import * as nodemailer from 'nodemailer';
 
 @Injectable()
 export class UsersService {
@@ -137,6 +140,195 @@ export class UsersService {
     return { message: 'Account deleted successfully' };
   }
 
+  async activateDeactivateUser(
+    requesterId: string,
+    userId: string,
+    status: Status,
+  ) {
+    console.log(`User ${userId} status changed to ${status} by ${requesterId}`);
+    const requester = await this.prisma.user.findUnique({
+      where: { user_id: requesterId },
+      select: { role: true },
+    });
+
+    if (!requester) {
+      throw new NotFoundException('Requester not found');
+    }
+
+    if (requester.role !== 'ADMIN') {
+      throw new UnauthorizedException(
+        'Only admins can activate or deactivate users',
+      );
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { user_id: userId },
+      select: { user_id: true, email: true, status: true },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    if (user.status === status) {
+      throw new BadRequestException(`User is already ${status}`);
+    }
+
+    const updatedUser = await this.prisma.user.update({
+      where: { user_id: userId },
+      data: {
+        status,
+        refreshToken: status === 'SUSPENDED' ? null : undefined, // Clear refresh token if suspended
+        updated_at: new Date(),
+      },
+    });
+
+    // Send email notification
+    const transporter = nodemailer.createTransport({
+      service: 'Gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    const statusText = status === 'ACTIVE' ? 'activated' : 'deactivated';
+    const htmlTemplate = `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Account Status Update</title>
+        <style>
+          body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; }
+          .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+          .header { background-color: #1e40af; color: white; text-align: center; padding: 20px; }
+          .content { padding: 20px; color: #333; }
+          .footer { text-align: center; padding: 10px; font-size: 12px; color: #666; background-color: #f4f4f4; }
+          @media (max-width: 600px) { .container { width: 100% !important; margin: 0; border-radius: 0; } .content { padding: 10px; } }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Marketing Dashboard</h1>
+          </div>
+          <div class="content">
+            <p>Hello,</p>
+            <p>Your account has been ${statusText}.</p>
+            <p>${
+              status === 'ACTIVE'
+                ? 'You can now log in to the Marketing Dashboard.'
+                : 'You have been logged out and can no longer access the Marketing Dashboard. Contact your administrator for assistance.'
+            }</p>
+          </div>
+          <div class="footer">
+            <p>&copy; 2025 Marketing Dashboard. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    await transporter.sendMail({
+      from: `"Marketing" <${process.env.EMAIL_USER}>`,
+      to: user.email,
+      subject: `Account ${statusText.charAt(0).toUpperCase() + statusText.slice(1)}`,
+      html: htmlTemplate,
+    });
+
+    return {
+      user_id: updatedUser.user_id,
+      status: updatedUser.status,
+      message: `User ${statusText} successfully`,
+    };
+  }
+
+  async usersInvite(requesterId: string, emails: string[]) {
+    // Validate requester is admin
+    const requester = await this.prisma.user.findUnique({
+      where: { user_id: requesterId },
+      select: { role: true },
+    });
+
+    if (!requester) {
+      throw new NotFoundException('Requester not found');
+    }
+
+    if (requester.role !== 'ADMIN') {
+      throw new UnauthorizedException('Only admins can invite users');
+    }
+
+    // Validate email array
+    if (!emails || !Array.isArray(emails) || emails.length === 0) {
+      throw new BadRequestException('A non-empty array of emails is required');
+    }
+    // Send invitation emails
+    const transporter = nodemailer.createTransport({
+      service: 'Gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    const signUpUrl = 'http://localhost:3000/signup'; // Replace with your actual sign-up URL
+    const htmlTemplate = `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Invitation to Join Marketing Dashboard</title>
+        <style>
+          body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; }
+          .container { max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+          .header { background-color: #1e40af; color: white; text-align: center; padding: 20px; }
+          .content { padding: 20px; color: #333; }
+          .button { display: inline-block; padding: 10px 20px; background-color: #1e40af; color: white; text-decoration: none; border-radius: 5px; font-size: 16px; margin-top: 20px; }
+          .button:hover { background-color: #1d4ed8; }
+          .footer { text-align: center; padding: 10px; font-size: 12px; color: #666; background-color: #f4f4f4; }
+          @media (max-width: 600px) { .container { width: 100% !important; margin: 0; border-radius: 0; } .content { padding: 10px; } }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Marketing Dashboard</h1>
+          </div>
+          <div class="content">
+            <p>Hello,</p>
+            <p>You have been invited to join the Marketing Dashboard. Click the button below to sign up and get started:</p>
+            <a href="${signUpUrl}" class="button">Join Now</a>
+            <p>If you have any questions, please contact your administrator.</p>
+          </div>
+          <div class="footer">
+            <p>&copy; 2025 Marketing Dashboard. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    // Send emails to all invitees
+    const sendEmailPromises = emails.map((email) =>
+      transporter.sendMail({
+        from: `"Marketing" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: 'Invitation to Join Marketing Dashboard',
+        html: htmlTemplate,
+      }),
+    );
+
+    await Promise.all(sendEmailPromises);
+
+    return {
+      message: `Invitations sent successfully to ${emails.length} user(s)`,
+      invitedEmails: emails,
+    };
+  }
+
   async getProfileCompletionPercentage(userId: string): Promise<number> {
     const user = await this.prisma.user.findUnique({
       where: { user_id: userId },
@@ -223,16 +415,16 @@ export class UsersService {
     };
   }
   async getNotificationPreferences(userId: string) {
-  const preferences = await this.prisma.notificationPreference.findUnique({
-    where: { userId },
-  });
+    const preferences = await this.prisma.notificationPreference.findUnique({
+      where: { userId },
+    });
 
-  if (!preferences) {
-    throw new NotFoundException('Notification preferences not found');
+    if (!preferences) {
+      throw new NotFoundException('Notification preferences not found');
+    }
+
+    return preferences;
   }
-
-  return preferences;
-}
 
   async updateNotificationPreferences(
     userId: string,
